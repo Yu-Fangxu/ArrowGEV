@@ -514,8 +514,7 @@ class TimeR1_Trainer(Trainer):
     ):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
-        original_video_path = inputs[0]["video_path"]
-        reversed_video_path = inputs[0]["video_path"]
+        sentence = inputs[0]["problem"]
         messages = [
             {
                 "role": "user",
@@ -529,8 +528,6 @@ class TimeR1_Trainer(Trainer):
                 ],
             }
         ]
-        
-
         image_inputs, video_inputs, video_kwargs = process_vision_info_v3(
             [messages], return_video_kwargs=True
         )
@@ -580,72 +577,6 @@ class TimeR1_Trainer(Trainer):
             completion_ids = prompt_completion_ids[:, prompt_length:]
             prompt_mask = prompt_mask.repeat_interleave(self.num_generations, dim=0)
 
-        #### newly added
-        reversed_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video",
-                        "video": reversed_video_path,
-                        "total_pixels": 3584 * 28 * 28,
-                        "min_pixels": 16 * 28 * 28,
-                    },
-                ],
-            }
-        ]
-        
-
-        reversed_image_inputs, reversed_video_inputs, reversed_video_kwargs = process_vision_info_v3(
-            [reversed_messages], return_video_kwargs=True
-        )
-        fps_inputs = reversed_video_kwargs["fps"]
-
-        prompts = [self.make_conversation_video(example) for example in inputs]
-
-        prompts_text = [
-            self.processing_class.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True
-            )
-            for prompt in prompts
-        ]
-
-        image_inputs = None
-
-        prompt_inputs = self.processing_class(
-            text=[prompts_text[0]],
-            images=image_inputs,
-            videos=[video_inputs[0]],
-            fps=[fps_inputs[0]],
-            padding=True,
-            return_tensors="pt",
-            padding_side="left",
-            add_special_tokens=False,
-        )
-
-        prompt_inputs = super()._prepare_inputs(prompt_inputs)
-
-        prompt_ids, prompt_mask = (
-            prompt_inputs["input_ids"],
-            prompt_inputs["attention_mask"],
-        )
-        pixel_values_videos = prompt_inputs["pixel_values_videos"]
-        video_grid_thw = prompt_inputs["video_grid_thw"]
-
-        # Generate completions
-        with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-            prompt_completion_ids = unwrapped_model.generate(
-                **prompt_inputs,
-                generation_config=self.generation_config,
-                # use_model_defaults=False,
-            )
-
-            prompt_length = prompt_ids.size(1)
-            prompt_ids = prompt_completion_ids[:, :prompt_length]
-            completion_ids = prompt_completion_ids[:, prompt_length:]
-            prompt_mask = prompt_mask.repeat_interleave(self.num_generations, dim=0)
-
-        ### newly added end
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
         device = self.accelerator.device
@@ -717,16 +648,88 @@ class TimeR1_Trainer(Trainer):
                 for completion in completions
             ]
 
+        #### Reverse video:
+        reverse_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video",
+                        "video": inputs[0]["video_reverse_path"],
+                        "total_pixels": 3584 * 28 * 28,
+                        "min_pixels": 16 * 28 * 28,
+                    },
+                ],
+            }
+        ]
+        reverse_image_inputs, reverse_video_inputs, reverse_video_kwargs = process_vision_info_v3(
+            [reverse_messages], return_video_kwargs=True
+        )
+        reverse_fps_inputs = reverse_video_kwargs["fps"]
+
+        reverse_prompts = [self.make_conversation_video(example) for example in inputs]
+
+        reverse_prompts_text = [
+            self.processing_class.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True
+            )
+            for prompt in reverse_prompts
+        ]
+
+        reverse_image_inputs = None
+
+        reverse_prompt_inputs = self.processing_class(
+            text=[reverse_prompts_text[0]],
+            images=reverse_image_inputs,
+            videos=[reverse_video_inputs[0]],
+            fps=[reverse_fps_inputs[0]],
+            padding=True,
+            return_tensors="pt",
+            padding_side="left",
+            add_special_tokens=False,
+        )
+
+        reverse_prompt_inputs = super()._prepare_inputs(reverse_prompt_inputs)
+
+        reverse_prompt_ids, reverse_prompt_mask = (
+            reverse_prompt_inputs["input_ids"],
+            reverse_prompt_inputs["attention_mask"],
+        )
+        # reverse_pixel_values_videos = reverse_prompt_inputs["pixel_values_videos"]
+        # reverse_video_grid_thw = reverse_prompt_inputs["video_grid_thw"]
+
+        # Generate completions
+        with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+            reverse_prompt_completion_ids = unwrapped_model.generate(
+                **reverse_prompt_inputs,
+                generation_config=self.generation_config,
+                # use_model_defaults=False,
+            )
+
+            reverse_prompt_length = reverse_prompt_ids.size(1)
+            reverse_prompt_ids = reverse_prompt_completion_ids[:, :reverse_prompt_length]
+            reverse_completion_ids = reverse_prompt_completion_ids[:, reverse_prompt_length:]
+            reverse_prompt_mask = reverse_prompt_mask.repeat_interleave(self.num_generations, dim=0)
+        reverse_completions = self.processing_class.batch_decode(
+            reverse_completion_ids, skip_special_tokens=True
+        )
+        if is_conversational(inputs[0]):
+            reverse_completions = [
+                [{"role": "assistant", "content": completion}]
+                for completion in reverse_completions
+            ]
+
         # Compute the rewards
         prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]
-
+        # print("prompts", prompts)
         rewards_per_func = torch.zeros(
             len(prompts), len(self.reward_funcs), device=device
         )
-
+        # print(rewards_per_func.shape)
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
+            # print("reward name:", reward_func.__name__)
             if isinstance(reward_func, PreTrainedModel):
                 if is_conversational(inputs[0]):
                     messages = [
@@ -750,6 +753,26 @@ class TimeR1_Trainer(Trainer):
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[
                         :, 0
                     ]  # Shape (B*G,)
+            elif reward_func.__name__ == "llm_reward":
+                # print("reward_kwargs:", reward_kwargs)
+                reward_kwargs = {
+                    key: []
+                    for key in inputs[0].keys()
+                    if key not in ["prompt", "completion"]
+                }
+                # print("prompts", prompts)
+                solution = inputs[0]['solution']
+                solutions = [solution for _ in range(self.num_generations)]
+                duration = inputs[0]['durations']
+                durations = [duration for _ in range(self.num_generations)]
+                both_completions = completions + reverse_completions
+                output_reward_func = reward_func(
+                    sentence=sentence, completions=both_completions, solutions=solutions, durations=durations, alpha_coeff=0.5
+                )
+                # output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
+                rewards_per_func[:, i] = torch.tensor(
+                    output_reward_func, dtype=torch.float32, device=device
+                )
             else:
                 reward_kwargs = {
                     key: []
