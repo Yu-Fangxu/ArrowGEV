@@ -480,120 +480,6 @@ def iou_timestamp_reward(
 
     return rewards
 
-
-def iou_timestamp_reward_v2(
-    completions, solution, **kwargs
-):  # Modified reward function name and arguments
-    """Reward function that calculates IoU between predicted and ground truth timestamps."""
-    rewards = []
-    current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
-    durations = kwargs.get("durations")
-    for content, sol, duration in zip(
-        completions, solution, durations
-    ):  # Added video_durations
-
-        reward = 0.0
-        parsed_times = parse_timestamp_output(content)
-        start_time, end_time = 0, 0
-        gt_start, gt_end = sol
-        s, e = gt_start, gt_end
-        if parsed_times:
-            start_time, end_time = parsed_times
-            from_number = start_time
-            to_number = end_time
-
-            intersection = max(0, min(to_number, e) - max(from_number, s))
-            union = max(to_number, e) - min(from_number, s)
-            if union > 0:
-                iou = intersection / union  # 0.1 0.3
-
-            gt_start_norm = 1.0 * s / duration
-            gt_end_norm = 1.0 * e / duration
-            pred_start_norm = 1.0 * start_time / duration
-            pred_end_norm = 1.0 * end_time / duration
-            reward = (
-                iou
-                * (1 - abs(gt_start_norm - pred_start_norm))
-                * (1 - abs(gt_end_norm - pred_end_norm))
-            )
-        rewards.append(reward)
-
-        if os.getenv("DEBUG_MODE") == "true":
-            log_path = os.getenv("LOG_PATH")
-            log_path = log_path.removeprefix("/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/")
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"Content: {content}\n")
-                f.write(f"pred second: {str(start_time)}, {str(end_time)}\n")
-                f.write(f"gt second: {str(gt_start)}, {str(gt_end)}\n")
-                f.write(
-                    f"------------- {current_time} IoU reward: {reward} -------------\n"
-                )  # Modified log message
-
-    return rewards
-
-def TemporalNCE(
-    completions, solution, **kwargs
-):  # Modified reward function name and arguments
-    """Reward function that calculates IoU between predicted and ground truth timestamps."""
-    rewards = []
-    current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
-    durations = kwargs.get("durations")
-    for content, sol, duration in zip(
-        completions, solution, durations
-    ):  # Added video_durations
-        temperature = 0.1
-        reward = 0.0
-        parsed_times = parse_timestamp_output(content)
-        start_time, end_time = 0, 0
-        gt_start, gt_end = sol
-        s, e = gt_start, gt_end
-        reverse_start = 2 * duration - gt_end
-        reverse_end = 2 * duration - gt_start
-        if parsed_times:
-            pos_iou = 0.0
-            neg_iou = 0.0
-            start_time, end_time = parsed_times
-            from_number = start_time
-            to_number = end_time
-
-            pos_intersection = max(0, min(to_number, e) - max(from_number, s))
-            pos_union = max(to_number, e) - min(from_number, s)
-            if pos_union > 0:
-                pos_iou = pos_intersection / pos_union  # 0.1 0.3
-
-            neg_intersection = max(0, min(to_number, reverse_end) - max(from_number, reverse_start))
-            neg_union = max(to_number, reverse_end) - min(from_number, reverse_start)
-
-            if neg_union > 0:
-                neg_iou = neg_intersection / neg_union  # 0.1 0.3
-            pos_iou = torch.tensor(pos_iou)
-            neg_iou = torch.tensor(neg_iou)
-            reward = torch.exp(pos_iou / temperature) / (torch.exp(pos_iou / temperature) + torch.exp(neg_iou / temperature))
-       
-            # gt_start_norm = 1.0 * s / duration
-            # gt_end_norm = 1.0 * e / duration
-            # pred_start_norm = 1.0 * start_time / duration
-            # pred_end_norm = 1.0 * end_time / duration
-            # reward = (
-            #     iou
-            #     * (1 - abs(gt_start_norm - pred_start_norm))
-            #     * (1 - abs(gt_end_norm - pred_end_norm))
-            # )
-        rewards.append(reward)
-
-        if os.getenv("DEBUG_MODE") == "true":
-            log_path = os.getenv("LOG_PATH")
-            log_path = log_path.removeprefix("/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/")
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"Content: {content}\n")
-                f.write(f"pred second: {str(start_time)}, {str(end_time)}\n")
-                f.write(f"gt second: {str(gt_start)}, {str(gt_end)}\n")
-                f.write(
-                    f"------------- {current_time} IoU reward: {reward} -------------\n"
-                )  # Modified log message
-    print("rewards:", rewards)
-    return rewards
-
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
     pattern = re.compile(r"<think>.*?</think>\s*<answer>.*?</answer>", re.DOTALL)
@@ -778,8 +664,6 @@ def diversity_reward_func(completions, num_generations=8, **kwargs):
 
 reward_funcs_registry = {
     "iou": iou_timestamp_reward,  # Modified registry to use iou_timestamp_reward
-    "iou_v2": iou_timestamp_reward_v2,
-    "iou_ct": TemporalNCE,
     "format": format_reward,
     "llm_reward": llm_reward
 }
