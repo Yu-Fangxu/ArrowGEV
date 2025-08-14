@@ -1,28 +1,26 @@
-# Copyright 2025 The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import json
 import math
 import os
 import random
 import re
-from dataclasses import dataclass, field
-from datetime import datetime
 from typing import List, Optional
+from datetime import datetime
+from dataclasses import dataclass, field
 
-import numpy as np
+import json
+import random
+import math
+import sys
+import concurrent.futures
+import itertools
+
+sys.path.append('/home/ershisui/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/ziyaolu/multimodal/code/VLM-R1/')
+
+from openai import OpenAI
+
+# ----------------------- Fix the flash attention bug in the current version of transformers -----------------------
 import torch
+import numpy as np
 from datasets import Dataset
 from deepspeed.runtime.fp16.loss_scaler import LossScaler
 from deepspeed.runtime.zero.config import ZeroStageEnum
@@ -36,9 +34,291 @@ from transformers import (
     TrainingArguments,
 )
 from trl import GRPOConfig, ModelConfig, ScriptArguments, TrlParser, get_peft_config
+from string import Template
 
 torch.serialization.add_safe_globals([ZeroStageEnum])
 torch.serialization.add_safe_globals([LossScaler])
+
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+RM_PROMPT = """
+**You are an AI assistant specializing in the analysis of temporal properties of events.**
+You will be given a sentence describing an event.
+
+**Your task is to:**
+1.  Analyze the event described in the sentence.
+2.  Determine if the event is temporally **sensitive** or **insensitive**.
+3.  Output the results in a strict JSON format without any additional text or explanations.
+
+---
+### **Input**
+**Event Sentence:** ${sentence}
+
+---
+### **Evaluation Criteria**
+* **Time-Sensitive (sensitive: yes):** The event has a clear forward direction. If played in reverse, it describes a different, often nonsensical or opposite, event. This indicates temporal asymmetry.
+    * *Example:* "A person puts a picture on the wall." (Reversed: "A person takes a picture off the wall.")
+    * *Example:* "A glass shatters." (Reversed: "Shards of glass assemble into a whole glass.")
+
+* **Time-Insensitive (sensitive: no):** The event is a continuous state or a cyclical action. If played in reverse, the fundamental nature of the event does not change. This indicates temporal symmetry.
+    * *Example:* "A person is playing with a light switch." (Reversed: Still looks like a person playing with a light switch.)
+    * *Example:* "A ball is bouncing in place." (Reversed: Still a ball bouncing in place.)
+---
+### **Output Format**
+Now, please output your result below in a JSON format by filling in the placeholders in [] without any explanations:
+
+{
+  "reason": "[Briefly explain why the event is reversible or irreversible, describing the forward and reverse action.]",
+  "sensitive": "[yes/no]"
+}
+"""
+
+import base64
+openai_api_key = "EMPTY"
+openai_api_base = "http://{openai_ip}:{port}/v1"
+clients = [
+OpenAI(
+api_key=openai_api_key,
+base_url=f"http://29.226.50.232:{port}/v1"
+) for port in [8000, 8001, 8002, 8003]
+]
+
+def calculate_iou(interval1_start, interval1_end, interval2_start, interval2_end, duration):
+    """
+    Calculates the Intersection over Union (IoU) of two 1D intervals.
+
+    Args:
+        interval1_start (float or int): Start of the first interval.
+        interval1_end (float or int): End of the first interval.
+        interval2_start (float or int): Start of the second interval.
+        interval2_end (float or int): End of the second interval.
+
+    Returns:
+        float: The IoU value (between 0.0 and 1.0), or 0.0 if the union is zero.
+    """
+    # Ensure intervals are correctly ordered (start <= end)
+    # This might not be strictly necessary if inputs are always ordered,
+    # but it adds robustness.
+    i1_s, i1_e = min(interval1_start, interval1_end), max(interval1_start, interval1_end)
+    i2_s, i2_e = min(interval2_start, interval2_end), max(interval2_start, interval2_end)
+
+    # Calculate the intersection
+    # The intersection starts at the maximum of the two start points
+    # The intersection ends at the minimum of the two end points
+    intersection_start = max(i1_s, i2_s)
+    intersection_end = min(i1_e, i2_e)
+
+    # Intersection length: if intersection_end < intersection_start, there's no overlap, so intersection is 0
+    intersection = max(0, intersection_end - intersection_start)
+
+    # Calculate the union
+    # The union starts at the minimum of the two start points
+    # The union ends at the maximum of the two end points
+    union_start = min(i1_s, i2_s)
+    union_end = max(i1_e, i2_e)
+
+    # Union length
+    union = union_end - union_start
+
+    # Calculate IoU
+    if union > 0:
+        iou = intersection / union
+    else:
+        # If union is 0 (e.g., both intervals are single points and identical, or invalid input),
+        # IoU is typically considered 0 or undefined. We return 0.0 here.
+        iou = 0.0
+
+    gt_start_norm = 1.0 * interval2_start / duration
+    gt_end_norm = 1.0 * interval2_end / duration
+    pred_start_norm = 1.0 * interval1_start / duration
+    pred_end_norm = 1.0 * interval1_end / duration
+    iou = (
+        iou
+        * (1 - abs(gt_start_norm - pred_start_norm))
+        * (1 - abs(gt_end_norm - pred_end_norm))
+    )
+
+    return iou
+
+def llm_reward(sentence, completions, solutions, durations, alpha_coeff, sensitivity=None):
+    def get_rm_result(client, sentence, f_period, f_ground, r_period, r_ground):
+        prompt = Template(RM_PROMPT).substitute(sentence=sentence)
+        user_content = [
+            {
+                "type": "text",
+                "text": prompt
+            }
+        ]
+
+        msgs = [
+            {
+                "role": "system",
+                "content": RM_SYSTEM,
+                # "name": "string"
+            },
+            {
+                "role": "user",
+                "content": user_content,
+                # "name": "string"
+            },
+        ]
+
+        response = client.chat.completions.create(
+            messages=msgs,
+            model="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/zhenzcao/img_translate/2.MLLM/3.pretrained_models/Qwen2.5-VL-72B-Instruct_new/Qwen2.5-VL-72B-Instruct/",
+            max_tokens=4096,
+            temperature=0.0,
+            top_p=1.0,
+            n=1,
+            seed=42,
+            extra_body={'repetition_penalty': 1.05}
+        )
+        response_content = response.choices[0].message.content
+        cleaned_content = response_content.strip()
+
+        json_match = re.search(r'```json\s*(.*?)\s*```', cleaned_content, re.DOTALL)
+        if json_match:
+            cleaned_content = json_match.group(1).strip()
+
+        return cleaned_content
+
+    contents = completions
+    num_rollout = len(contents) // 2
+    reverse_contents = contents[num_rollout:]
+    contents = contents[:num_rollout]
+    rewards = []
+    current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+    tempo_pattern = r'<answer>(.*?)</answer>'
+    cot_pattern = r'<think>(.*?)</think>'
+    client_cycle = itertools.cycle(clients)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as executor:
+        futures = []
+        content_list = []
+        rev_content_list = []
+        sol_list = []
+        reasoning_list = []
+        for content, rev_content, sol, duration in zip(contents, reverse_contents, solutions, durations):
+            client = next(client_cycle)
+            parsed_times = parse_timestamp_output(content)
+            parsed_times_rev = parse_timestamp_output(rev_content)
+
+            start_time, end_time = 0, 0
+            start_time_rev, end_time_rev = 0, 0
+            gt_start, gt_end = sol # forward temporal interval
+            reverse_start = duration - gt_end # reverse temporal interval
+            reverse_end = duration - gt_start
+            if parsed_times:
+                start_time, end_time = parsed_times
+                # from_number = start_time
+                # to_number = end_time
+            if parsed_times_rev:
+                start_time_rev, end_time_rev = parsed_times_rev
+            #print("prompt", prompt)
+            #print("content", content)
+            # base64_image = encode_image(image_path)
+            # ocr = prompt.split("\n")[1].strip()
+            # location = prompt.split("at location:")[1].split(")")[0].strip()
+            # reward = 0.0
+            # Try symbolic verification first
+            # ocr_list.append(ocr)
+            sol_list.append(sol)
+
+            reasoning = "Invalid Reason."
+            cot_match = re.search(cot_pattern, content, re.DOTALL)
+            if cot_match:
+                reasoning = cot_match.group(1).strip()
+            reasoning_list.append(reasoning)
+
+            f_period = str([start_time, end_time])
+            f_ground = str([gt_start, gt_end])
+            r_period = str([start_time_rev, end_time_rev])
+            r_ground = str([reverse_start, reverse_end])
+            if sensitivity is None:
+                future = executor.submit(
+                    get_rm_result,
+                    client,
+                    sentence=sentence,
+                    f_period=f_period, 
+                    f_ground=f_ground, 
+                    r_period=r_period, 
+                    r_ground=r_ground
+                )
+                futures.append(future)
+
+            content_list.append([start_time, end_time])
+            rev_content_list.append([start_time_rev, end_time_rev])
+
+        rm_results = []
+        if sensitivity is None:
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                rm_results.append(result)
+        else:
+            result = f'{{"sensitive": "{sensitivity}"}}'
+            for _ in range(len(content_list)):
+                rm_results.append(result)
+        # assert len(rm_results) == len(ocr_list)
+        assert len(rm_results) == len(content_list)
+        assert len(rm_results) == len(sol_list)
+        # assert len(rm_results) == len(reasoning_list)
+
+        ious = []
+
+        for rm_result, content, rev_content, sol, reasoning, duration in zip(rm_results, content_list, rev_content_list, sol_list, reasoning_list, durations):
+            """
+            <comparison_score> comparison score here </comparison_score>
+            <style_score> style score here </style_score>
+            <reasoning_score> reasoning score here </reasoning_score>
+            """
+            # print(rm_result, content, sol, reasoning)
+            # print("rm_result", rm_result)
+            try:
+                rm_res = json.loads(rm_result)
+                # iou_pos = rm_res['forward_score']
+                # iou_neg = rm_res['reverse_score']
+            except:
+                rm_res = {
+                      "sensitive": "yes"
+                }
+                r_s = duration - content[1]
+                r_e = duration - content[0]
+                iou_pos = calculate_iou(content[0], content[1], gt_start, gt_end, duration)
+                iou_neg = calculate_iou(rev_content[0], rev_content[1], r_s, r_e, duration)
+            sensitivity = rm_res["sensitive"]
+
+            gt_start, gt_end = sol
+            reverse_start = duration - gt_end # reverse temporal interval
+            reverse_end = duration - gt_start
+
+            r_s = duration - content[1]
+            r_e = duration - content[0]
+
+            iou_pos = calculate_iou(content[0], content[1], gt_start, gt_end, duration)
+            iou_neg = calculate_iou(rev_content[0], rev_content[1], r_s, r_e, duration)
+            reward = 0.0
+            if sensitivity.lower() == "yes":
+                reward += iou_pos + alpha_coeff * (1 - iou_neg)
+                second_term = 1 - iou_neg
+            else:
+                reward += iou_pos + alpha_coeff * iou_neg
+                second_term = iou_neg
+            
+            rewards.append(reward)
+            ious.append(iou_pos)
+            log_path = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/reward_logs/log_rev.txt"
+            
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"------- {current_time} Total reward: {reward}, sensitivity: {sensitivity}, iou_pos: {iou_pos}, iou_neg: {iou_neg} -------\n")
+                f.write(f"Candidate Interval: {content}\n")
+                f.write(f"Reverse Candidate Interval: {rev_content}\n")
+                f.write(f"Reference: {sol}\n")
+                f.write(f"Reverse Reference: {(reverse_start, reverse_end)}\n")
+                f.write(f"Forward IoU: {iou_pos}\n")
+                f.write(f"Reverse Term: {second_term}\n")
+    return rewards, sensitivity, ious
 
 
 @dataclass
@@ -65,10 +345,30 @@ class MY_GRPOConfig(GRPOConfig):
     )
 
     use_grpo: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether to use GRPO"},
     )
+    alpha_coeff: float = field(
+        default=0.5, # 设置一个默认值
+        metadata={"help": "The coefficient for balancing forward and reverse rewards in llm_reward."}
+    )
+    local_search: bool = field(
+        default=False,
+        metadata={"help": "Whether to use local search."},
+    ),
+    adv_adjust: bool = field(
+        default=False,
+        metadata={"help": "adjust the advantage weight"},
+    )
 
+    adv_adjust_miou: str = field(
+        default='exp',
+        metadata={"help": "How to adjust the advantage weight"},
+    )
+    tau: float = field(
+        default=2, # 设置一个默认值
+        metadata={"help": "The coefficient for balancing forward and reverse rewards in llm_reward."}
+    )
 
 @dataclass
 class GRPOScriptArguments(ScriptArguments):
@@ -118,7 +418,6 @@ class GRPOScriptArguments(ScriptArguments):
         metadata={"help": "Whether to use early stopping"},
     )
 
-
 def parse_timestamp_output(output_string):
     """Parses timestamp output, similar to the example code."""
     # 1. Find all <answer>...</answer> blocks.
@@ -129,7 +428,7 @@ def parse_timestamp_output(output_string):
 
     # 2. Use the content of the *last* <answer> block.
     last_answer_content = answer_matches[-1]
-    print("last_answer_content:", last_answer_content)
+    # print("last_answer_content:", last_answer_content)
 
     matches = re.findall(
         r"(\d+\.?\d*) (to|and) (\d+\.?\d*)", last_answer_content, re.IGNORECASE
@@ -270,7 +569,7 @@ def TemporalNCE(
             pos_iou = torch.tensor(pos_iou)
             neg_iou = torch.tensor(neg_iou)
             reward = torch.exp(pos_iou / temperature) / (torch.exp(pos_iou / temperature) + torch.exp(neg_iou / temperature))
-
+       
             # gt_start_norm = 1.0 * s / duration
             # gt_end_norm = 1.0 * e / duration
             # pred_start_norm = 1.0 * start_time / duration
@@ -292,14 +591,14 @@ def TemporalNCE(
                 f.write(
                     f"------------- {current_time} IoU reward: {reward} -------------\n"
                 )  # Modified log message
-
+    print("rewards:", rewards)
     return rewards
 
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
     pattern = re.compile(r"<think>.*?</think>\s*<answer>.*?</answer>", re.DOTALL)
     matches = [re.fullmatch(pattern, content.strip()) for content in completions]
-    print("matches:", matches)
+    # print("matches:", matches)
     return [1.0 if match else 0.0 for match in matches]
 
 
@@ -482,6 +781,7 @@ reward_funcs_registry = {
     "iou_v2": iou_timestamp_reward_v2,
     "iou_ct": TemporalNCE,
     "format": format_reward,
+    "llm_reward": llm_reward
 }
 
 metric_funcs_registry = {
@@ -504,12 +804,14 @@ def load_json_dataset_tg(
         examples = []
         for item in tqdm(data, desc=f"Processing {split_name} items"):
             video_path = item.get("video")
+            video_reverse_path = item.get("video_reverse_path")
             timestamps = item.get("timestamp")
             sentence = item.get("sentence")
             duration = item.get("duration")
             video_start = item.get("video_start")
             video_end = item.get("video_end")
-
+            qid = item.get("qid")
+            sensitive = item.get("sensitive")
             sentence = sentence.strip().lower()
             if sentence.endswith("."):
                 sentence = sentence[:-1]
@@ -519,6 +821,7 @@ def load_json_dataset_tg(
 
             example = {
                 "task_type": "tg", 
+                "qid": qid,
                 "problem": sentence,  
                 "choices": "",
                 "solution": (
@@ -526,6 +829,8 @@ def load_json_dataset_tg(
                     float(timestamps[1]),
                 ),
                 "video_path": video_path, 
+                "video_reverse_path": video_reverse_path,
+                'sensitive': sensitive,
                 "durations": duration, 
                 "video_start": video_start,
                 "video_end": video_end,
@@ -632,7 +937,8 @@ def main(script_args, training_args, model_args):
 
     callbacks_list = []
     if script_args.is_early_stopping:
-        callbacks_list.append(StopAfterNEpochsCallback())
+        callbacks_list.append(StopAfterNEpochsCallback(num_epochs_to_train=training_args.num_train_epochs))
+
 
     # Initialize the GRPO trainer
     trainer = trainer_cls(
