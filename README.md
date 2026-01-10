@@ -19,7 +19,7 @@ see [docs/INSTALL.md](./docs/INSTALL.md)
 
 ### Dataset
 
-Download the video data following [Time-R1](https://github.com/xiaomi-research/time-r1), and use our data annotation [ArrowGEV-Data](https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data/tree/main/Arrow-R1-Eval/Training)
+Download the video data following [docs/DATA.md](./docs/DATA.md), and use our data annotation [ArrowGEV-Data](https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data/tree/main/Arrow-R1-Eval/Training)
 
 ## Training
 
