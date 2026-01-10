@@ -3,7 +3,7 @@
 
 GPU_LIST="0,1,2,3,4,5,6,7"
 export CUDA_VISIBLE_DEVICES=$GPU_LIST
-export EXP_NAME=7b_kl_cot_03_iou_ours_2500_filtering
+export EXP_NAME=arrowgev
 export WANDB_PROJECT=Video-GRPO
 export PYTHONPATH=".:$PYTHONPATH"
 export DEBUG_MODE="true"
