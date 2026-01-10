@@ -1,4 +1,4 @@
-# Time-R1: ArrowGEV: Grounding Events in Video via Learning the Arrow of Time
+# ArrowGEV: Grounding Events in Video via Learning the Arrow of Time
 
 <div style='display:flex; gap: 0.25rem; '>
   <a href='https://arxiv.org/pdf/2503.13377v2'><img src='https://img.shields.io/badge/Paper-PDF-red'></a>
@@ -7,7 +7,7 @@
 </div>
 
 <p align="center" width="100%">
-<a target="_blank"><img src="assets/TimeR1_comparison.png" alt="Paradigm Comparisons on VideoQA" style="width: 80%; min-width: 200px; display: block; margin: auto;"></a>
+<a target="_blank"><img src="assets/main_arch.png" alt="Paradigm Comparisons on VideoQA" style="width: 80%; min-width: 200px; display: block; margin: auto;"></a>
 </p>
 
 ## Overview
