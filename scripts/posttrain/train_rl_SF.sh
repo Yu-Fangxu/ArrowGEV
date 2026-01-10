@@ -9,7 +9,7 @@ export PYTHONPATH=".:$PYTHONPATH"
 export DEBUG_MODE="true"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 # 初始路径设置
-INIT_DATA_PATH="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/timer1/annotations/train_2k5.json"
+INIT_DATA_PATH="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/arrowgev/annotations/train_2k5.json"
 # INIT_MODEL_PATH="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/ckpts/Qwen2.5-VL-3B-Instruct"
 # INIT_MODEL_PATH="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/ckpts/Qwen2.5-VL-7B-Instruct"
 INIT_MODEL_PATH="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/logs/7b_kl_cot_gaussian_03_iou_ours_2500_filtering/7b_kl_cot_gaussian_03_iou_ours_2500_filtering_0071_filter0/train_epoch0/checkpoint-157"
@@ -46,7 +46,7 @@ for FILTER_INDEX in {0..0}; do
         --output_dir $OUTDIR \
         --model_name_or_path $LOAD_MODEL_PATH \
         --train_data_path $DATA_PATH \
-        --video_folder /mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/timer1/videos/timerft_data \
+        --video_folder /mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/arrowgev/videos/timerft_data \
         --dataset_name timerft \
         --max_prompt_length 8192 \
         --max_completion_length 20 \
