@@ -1,5 +1,7 @@
 # ArrowGEV: Grounding Events in Video via Learning the Arrow of Time
 
+We study the temporal directionality problem in Grounding Events in Videos. Specifically, we enable Vision-Language Models to capture the intrinsic temporal structure of events by distinguishing between time-sensitive and time-insensitive semantics. In this work, we utilize a reinforcement learning framework to optimize the model's policy and design a temporal directionality reward to ensure the effective discrimination of event validity across forward and reversed videos.
+
 <div style='display:flex; gap: 0.25rem; '>
   <a href='https://arxiv.org/pdf/2503.13377v2'><img src='https://img.shields.io/badge/Paper-PDF-red'></a>
   <a href='ParadiseYu/ArrowGEV-7B'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_7B-blue'></a>
@@ -9,21 +11,6 @@
 <p align="center" width="100%">
 <a target="_blank"><img src="assets/main_arch.png" alt="Paradigm Comparisons on VideoQA" style="width: 80%; min-width: 200px; display: block; margin: auto;"></a>
 </p>
-
-## Overview
-
-### Contributions of Time-R1
-
-*   **Time-R1: RL-based framework for temporal video grounding**. We introduce a reasoning-guided post-training framework via RL with verifiable reward to enhance the capabilities of LVLMs on the TVG task. 
-*   **TimeRFT: Time-aware reinforcement fine-tuning.** We explore data-efficient post-training strategies on our curated RL-friendly dataset, which trains the model to progressively comprehend difficult samples, leading to better generalization.
-*   **TVGBench: Comprehensive benchmark for LVLMs on TVG.** We carefully construct a small yet comprehensive benchmark for LVLM evaluation, assessing 11 types of queries and featuring balanced distributions across both videos and queries.
-*   **State-of-the-Art results and generalization.** Extensive experiments demonstrate that Time-R1 achieves state-of-the-art performance across multiple downstream datasets using only 2.5K training data, while improving its general video understanding capabilities. 
-
-### Key Features of this codebase:
-
-*   **A codebase that supports training LVLM with RL.** 
-*   **Speedup inference time for temporal video grounding and video QA by vllm library.**<img src="./assets/vLLM-Full-Logo.png" alt="vLLM Logo" width="40px">
-*   **Experiment toolkits**: Support training on our TimeRFT, Charades, and ActivityNet; support vLLM inference on TVGBench, Charades, ActivityNet, MVBench,s TempCompass, VideoMME, EgoSchema.
 
 ## Setup
 
