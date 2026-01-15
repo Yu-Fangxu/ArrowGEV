@@ -53,23 +53,13 @@ We thank the following projects: [Time-R1](https://github.com/xiaomi-research/ti
 
 ## Citation
 
-If you find our work useful, please consider cite our paper :)
-
-
-```bibtex
-@article{wang2025timer1,
-      title={Time-R1: Post-Training Large Vision Language Model for Temporal Video Grounding}, 
-      author={Wang, Ye and Wang, Ziheng and Xu, Boshen and Du, Yang and Lin, Kejun and Xiao, Zihan and Yue, Zihao and Ju, Jianzhong and Zhang, Liang and Yang, Dingyi and Fang, Xiangnan and He, Zewen and Luo, Zhenbo and Wang, Wenxuan and Lin, Junqi and Luan, Jian and Jin, Qin},
-      journal={arXiv preprint arXiv:2503.13377},
-      year={2025},
-}
-```
+If you find our work useful, please consider cite our paper：
 
 ```bibtex
-@article{wang2025timezero,
-      title={TimeZero: Temporal Video Grounding with Reasoning-Guided LVLM},
-      author={Wang, Ye and Xu, Boshen and Yue, Zihao and Xiao, Zihan and Wang, Ziheng and Zhang, Liang and Yang, Dingyi and Wang, Wenxuan and Jin, Qin},
-      journal={arXiv preprint arXiv:2503.13377},
-      year={2025}
+@article{yu2026arrowgev,
+  title={ArrowGEV: Grounding Events in Video via Learning the Arrow of Time},
+  author={Yu, Fangxu and Lu, Ziyao and Niu, Liqiang and Meng, Fandong and Zhou, Jie},
+  journal={arXiv preprint arXiv:2601.06559},
+  year={2026}
 }
 ```
