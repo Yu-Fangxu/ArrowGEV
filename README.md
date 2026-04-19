@@ -17,8 +17,6 @@ We study the temporal directionality problem in Grounding Events in Videos. Spec
 - [Setup](#setup)
 - [Dataset](#dataset)
 - [Training](#training)
-- [Acknowledgements](#acknowledgements)
-- [Citation](#citation)
 
 ## Overview
 
