@@ -20,10 +20,10 @@ We study the temporal directionality problem in Grounding Events in Videos. Spec
 
 ## Overview
 
-ArrowGEV builds on Qwen2.5-VL and optimizes a policy with Group Relative Policy Optimization (GRPO) using a temporal directionality reward. For each training sample we generate predictions on both the forward video and its reversed counterpart and compute:
+ArrowGEV builds on Qwen2.5-VL and optimizes a policy with Group Relative Policy Optimization (GRPO) using a temporal directionality reward. For each training sample, we generate predictions on both the forward video and its reversed counterpart and compute:
 
 - An **IoU reward** that measures how well the predicted window matches the ground-truth window.
-- A **temporal-directionality reward** that penalizes windows that remain valid under time reversal for time-sensitive events, and rewards consistent windows for time-insensitive events. Sensitivity is taken directly from the pre-annotated `sensitive` field in the training data — no LLM judge is invoked at training time.
+- A **temporal-directionality reward** that penalizes windows that remain valid under time reversal for time-sensitive events, and rewards consistent windows for time-insensitive events. Sensitivity is taken directly from the pre-annotated `sensitive` field in the training data.
 - A **format reward** that enforces the `<think>...</think><answer>start to end</answer>` output structure.
 
 The trainer is implemented in [src/arrowgev/rl/arrowgev_trainer.py](src/arrowgev/rl/arrowgev_trainer.py).
