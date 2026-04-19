@@ -8,49 +8,40 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
 from src.vllm_inference.data import build_dataloader
+from src.vllm_inference.utils import monkey_patch
 from src.vllm_inference.vllm_infer import vllmWrapper
 
 
 def get_args():
     parser = argparse.ArgumentParser(
-        description="Evaluation for training-free video temporal grounding (Single GPU Version)"
+        description="Evaluate a Qwen2.5-VL checkpoint on video temporal grounding and MCQ benchmarks."
     )
     parser.add_argument(
         "--datatype",
         default="tg",
         type=str,
-        help="Specify the dataset.",
+        help="Task type (auto-detected from --datasets if not set).",
         choices=["tg", "mcq"],
     )
     parser.add_argument(
         "--model_base", type=str, default="../pretrained_models/Qwen2.5-VL-7B-Instruct"
     )
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="checkpoints",
-        help="Directory to save checkpoints",
-    )
-    parser.add_argument(
-        "--device", type=str, default="cuda:0", help="GPU device to use"
-    )
-    parser.add_argument(
-        "--pipeline_parallel_size", type=int, default=1, help="GPU nodes"
-    )
-    parser.add_argument("--split", type=str, default="train", help="dataset type")
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--pipeline_parallel_size", type=int, default=1)
+    parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--max_new_tokens", type=int, default=128)
-    parser.add_argument("--curr_idx", type=int, default=0, help="数据分片")
-    parser.add_argument("--total_idx", type=int, default=1, help="数据分片")
-    parser.add_argument(
-        "--total_pixels", type=int, default=3584 * 28 * 28, help="total_pixels"
-    )
+    parser.add_argument("--curr_idx", type=int, default=0, help="Shard index of this worker.")
+    parser.add_argument("--total_idx", type=int, default=1, help="Total number of shards.")
+    parser.add_argument("--total_pixels", type=int, default=3584 * 28 * 28)
     parser.add_argument(
         "--datasets",
         nargs="+",
         type=str,
-        help="dataset names",
+        help="Dataset names to evaluate.",
         choices=[
             "charades",
             "activitynet",
@@ -62,20 +53,12 @@ def get_args():
             "tempcompass",
         ],
     )
-    parser.add_argument(
-        "--use_r1_thinking_prompt", action="store_true", help="On R1 SHOUD BE TRUE!"
-    )
-    parser.add_argument(
-        "--use_vllm_inference", action="store_true"
-    )
-    parser.add_argument("--prompt_type", type=str, default="r1", help="Prompt type")
-    parser.add_argument(
-        "--use_nothink", action="store_true", help="Use no think prompt"
-    )
+    parser.add_argument("--use_vllm_inference", action="store_true")
+    parser.add_argument("--use_nothink", action="store_true", help="Append an empty <think> block.")
     parser.add_argument(
         "--use_prepared_video",
         action="store_true",
-        help="Use video cache in ./video_cache",
+        help="Load pre-encoded videos from ./video_cache.",
     )
     return parser.parse_args()
 
@@ -194,8 +177,6 @@ def main(args):
         "dataset_names": args.datasets,
         "use_prepared_video": args.use_prepared_video,
         "total_pixels": args.total_pixels,
-        "use_r1_thinking_prompt": args.use_r1_thinking_prompt,
-        "prompt_type": args.prompt_type,
         "use_nothink": args.use_nothink,
     }
 
@@ -285,37 +266,25 @@ def main(args):
                 )
                 f.flush()
 
-    # --- END TOTAL TIME & CALCULATIONS ---
-    program_end_time = time.perf_counter()
-    total_program_duration = program_end_time - program_start_time
+    elapsed = time.perf_counter() - program_start_time
+    print(f"\nTotal program execution time: {elapsed:.2f} seconds")
+    with open(
+        os.path.join(args.output_dir, "timing_summary_vllm.txt"), "w", encoding="utf-8"
+    ) as out_f:
+        out_f.write(f"Total program execution time: {elapsed:.2f} seconds\n")
 
-    print("\n--- Timing Summary ---")
-    print(f"Total program execution time: {total_program_duration:.2f} seconds")
 
-    output_filename = f"{args.output_dir}/timing_summary_vllm.txt"
-
-    with open(output_filename, "w", encoding="utf-8") as f:
-        f.write("\n--- Timing Summary ---\n")
-        f.write(f"Total program execution time: {total_program_duration:.2f} seconds\n")
-        f.write("Another line of summary using write.\n")
+MCQ_DATASETS = {"mvbench", "videomme", "tempcompass"}
+TG_DATASETS = {"tvgbench", "tvgbench_filter", "charades", "activitynet"}
 
 
 if __name__ == "__main__":
-    from src.vllm_inference.utils import monkey_patch
-
     monkey_patch()
     args = get_args()
-    if "mvbench" in args.datasets \
-        or "videomme" in args.datasets \
-        or "tempcompass" in args.datasets:
+    if any(d in MCQ_DATASETS for d in args.datasets):
         args.datatype = "mcq"
-    elif (
-        "tvgbench" in args.datasets \
-        or "tvgbench_filter" in args.datasets \
-        or "charades" in args.datasets \
-        or "activitynet" in args.datasets \
-    ):
+    elif any(d in TG_DATASETS for d in args.datasets):
         args.datatype = "tg"
     else:
-        raise ValueError("Unsupported dataset type. Please check your datasets.")
+        raise ValueError(f"Unsupported datasets: {args.datasets}")
     main(args)

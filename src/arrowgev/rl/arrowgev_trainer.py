@@ -16,10 +16,12 @@ import os
 import textwrap
 from collections import defaultdict
 from typing import Any, Callable, Optional, Union
-
+import pickle
+import numpy as np
 import torch
 import torch.utils.data
 import transformers
+import math
 from datasets import Dataset, IterableDataset
 from packaging import version
 from transformers import (
@@ -45,6 +47,8 @@ from trl.models import (
 from trl.trainer.grpo_config import GRPOConfig
 from trl.trainer.utils import generate_model_card, get_comet_experiment_url
 
+from src.utils import process_vision_info_v3
+
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
 
@@ -58,33 +62,11 @@ MetricFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 
 SYSTEM_PROMPT = "You are a video analysis expert."
 
-QUESTION_TEMPLATE_TG_v1 = """To accurately pinpoint the event "[EVENT]" in the video, determine the precise time period of the event.
+QUESTION_TEMPLATE_TG = """To accurately pinpoint the event "[EVENT]" in the video, determine the precise time period of the event.
 
 Output your thought process within the <think> </think> tags, including analysis with either specific time ranges (xx.xx to xx.xx) in <timestep> </timestep> tags.
 
 Then, provide the start and end times (in seconds, precise to two decimal places) in the format "start time to end time" within the <answer> </answer> tags. For example: "12.54 to 17.83"."""
-
-QUESTION_TEMPLATE_TG_v2 = """To accurately pinpoint the event "[EVENT]" in the video, determine the precise time period of the event.
-
-Provide the start and end times (in seconds, precise to two decimal places) in the format "start time to end time" within the <answer> </answer> tags. For example: "12.54 to 17.83"."""
-
-QUESTION_TEMPLATE_TG_v3 = """Carefully analyze the video content to determine the precise time period during which "[EVENT]" occurs.  Within the `<think>` tags, provide a detailed description of your thought process, following the format below:
-```
-<think>
-Step-by-step Analysis:
-<timestep>Time period 1 (start time to end time)</timestep>: Describe the video content within this time period and determine if it is related to "[EVENT]".
-<timestep>Time period 2 (start time to end time)</timestep>: Describe the video content within this time period and determine if it is related to "[EVENT]".
-Based on the above analysis, state the precise time period during which "[EVENT]" occurs.
-</think>
-```
-Finally, in the `<answer>` tags, provide the start and end times of "[EVENT]" in the format "start time to end time" (in seconds, precise to two decimal places). For example: "12.54 to 17.83".
-```
-<answer>
-start time to end time
-</answer>
-```"""
-
-
 def nanmin(tensor: torch.Tensor) -> torch.Tensor:
     """
     Compute the minimum value of a tensor, ignoring NaNs. This function only supports 1D tensors.
@@ -115,7 +97,7 @@ def nanmax(tensor: torch.Tensor) -> torch.Tensor:
     return torch.max(tensor[~torch.isnan(tensor)])
 
 
-class TimeR1_Trainer_ft(Trainer):
+class ArrowGEV_Trainer(Trainer):
     """
     Trainer for the Group Relative Policy Optimization (GRPO) method. This algorithm was initially proposed in the
     paper [DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models](https://huggingface.co/papers/2402.03300).
@@ -222,6 +204,7 @@ class TimeR1_Trainer_ft(Trainer):
         min_pixels: Optional[int] = 3136,
         attn_implementation: str = "flash_attention_2",
     ):
+
         # Args
         if args is None:
             model_name = model if isinstance(model, str) else model.config._name_or_path
@@ -257,12 +240,16 @@ class TimeR1_Trainer_ft(Trainer):
                 else model_init_kwargs.get("use_cache")
             )
             print("model_init_kwargs['use_cache']", model_init_kwargs["use_cache"])
+            print("model_init_kwargs", model_init_kwargs)
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 model,
                 torch_dtype=torch.bfloat16,
                 use_sliding_window=args.slide_window,
+                max_window_layers=args.max_window_layers,
+                sliding_window=args.sliding_window_length,
                 **model_init_kwargs,
             )
+            print("config", model.config)
         else:
             model_id = model.config._name_or_path
             if args.model_init_kwargs is not None:
@@ -291,7 +278,6 @@ class TimeR1_Trainer_ft(Trainer):
                 if hasattr(model.visual, "merger"):
                     print("merger exists")
                     model.visual.merger.requires_grad_(True)
-                # No else needed here for merger, if it doesn't exist, the whole visual remains frozen.
             else:
                 print(
                     "[WARNING] fix_vit=True but model.visual attribute not found. No freezing applied."
@@ -304,6 +290,7 @@ class TimeR1_Trainer_ft(Trainer):
 
         self.beta = args.beta
         self.use_grpo = args.use_grpo
+        self.alpha_coeff = args.alpha_coeff
         print("self.use_grpo", self.use_grpo)
 
         if self.beta == 0.0:
@@ -316,19 +303,15 @@ class TimeR1_Trainer_ft(Trainer):
                 **model_init_kwargs,
             )
         elif peft_config is None:
-            # If PEFT configuration is not provided, create a reference model based on the initial model.
             self.ref_model = create_reference_model(model)
         else:
-            # If PEFT is used, the reference model is not needed since the adapter can be disabled
-            # to revert to the initial model.
             self.ref_model = None
 
         # Processing class
         if processing_class is None:
 
-            # if "Qwen2-VL" in model_id or "Qwen2.5-VL" in model_id or "Aria" in model_id:
             processing_class = AutoProcessor.from_pretrained(model_id)
-            print(model_id)
+            # print(model_id)
             pad_token_id = processing_class.tokenizer.pad_token_id
             processing_class.pad_token_id = pad_token_id
             processing_class.eos_token_id = processing_class.tokenizer.eos_token_id
@@ -370,11 +353,19 @@ class TimeR1_Trainer_ft(Trainer):
                     reward_processing_class.pad_token = (
                         reward_processing_class.eos_token
                     )
-                # The reward model computes the reward for the latest non-padded token in the input sequence.
-                # So it's important to set the pad token ID to the padding token ID of the processing class.
                 reward_func.config.pad_token_id = reward_processing_class.pad_token_id
                 reward_processing_classes[i] = reward_processing_class
         self.reward_processing_classes = reward_processing_classes
+
+        # if os.path.exists(self.sensitivity_path):
+        #     with open(self.sensitivity_path, 'rb') as f:
+        #         self.sensitivity_dict = pickle.load(f)
+        # else:
+        #     self.sensitivity_dict = {}
+
+        self.enable_rewind_augmentation = False
+
+        self.rewind_k = 1
 
         # Data collator
         def data_collator(features):  # No data collation is needed in GRPO
@@ -395,17 +386,31 @@ class TimeR1_Trainer_ft(Trainer):
             num_return_sequences=self.num_generations,
             pad_token_id=pad_token_id,
         )
-        print(self.generation_config)
-        print(
-            "self.generation_config.transformers_version",
-            self.generation_config.transformers_version,
+        self.reverse_generation_config=GenerationConfig(
+            max_new_tokens=self.max_completion_length,
+            do_sample=False,
+            temperature=0,  # HACK
+            num_return_sequences=1,
+            pad_token_id=pad_token_id,
         )
+        self.num_aug = 4
+        self.local_search_generation_config=GenerationConfig(
+            max_new_tokens=self.max_completion_length,
+            do_sample=True,
+            temperature=1.2,  # HACK
+            num_return_sequences=self.num_aug,
+            pad_token_id=pad_token_id,
+        )
+        # print(self.generation_config)
+        # print(
+        #     "self.generation_config.transformers_version",
+        #     self.generation_config.transformers_version,
+        # )
         self.generation_config.transformers_version = "4.48.3"
-        print(
-            "self.generation_config.transformers_version",
-            self.generation_config.transformers_version,
-        )
-        # self.beta = args.beta
+        # print(
+        #     "self.generation_config.transformers_version",
+        #     self.generation_config.transformers_version,
+        # )
         args.epsilon = 0.2
         args.epsilon_high = None
         self.epsilon_low = args.epsilon
@@ -413,7 +418,6 @@ class TimeR1_Trainer_ft(Trainer):
             args.epsilon_high if args.epsilon_high is not None else args.epsilon
         )
 
-        self.prompt_type = args.prompt_type
         print("self.beta", self.beta)
         print("self.temperature", self.temperature)
 
@@ -509,13 +513,7 @@ class TimeR1_Trainer_ft(Trainer):
         return inputs
 
     def make_conversation_video(self, example):
-        print("self.prompt_type", self.prompt_type)
-        if self.prompt_type == "v1":
-            prompt_text = QUESTION_TEMPLATE_TG_v1.replace("[EVENT]", example["problem"])
-        elif self.prompt_type == "v2":
-            prompt_text = QUESTION_TEMPLATE_TG_v2.replace("[EVENT]", example["problem"])
-        elif self.prompt_type == "v3":
-            prompt_text = QUESTION_TEMPLATE_TG_v3.replace("[EVENT]", example["problem"])
+        prompt_text = QUESTION_TEMPLATE_TG.replace("[EVENT]", example["problem"])
 
         return [
             {
@@ -539,8 +537,28 @@ class TimeR1_Trainer_ft(Trainer):
     ):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
+        sentence = inputs[0]["problem"]
+        sensitivity = inputs[0]["sensitive"]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video",
+                        "video": inputs[0]["video_path"],
+                        "total_pixels": 3584 * 28 * 28,
+                        "min_pixels": 16 * 28 * 28,
+                    },
+                ],
+            }
+        ]
+        image_inputs, video_inputs, video_kwargs = process_vision_info_v3(
+            [messages], return_video_kwargs=True
+        )
+        fps_inputs = video_kwargs["fps"]
 
         prompts = [self.make_conversation_video(example) for example in inputs]
+
         prompts_text = [
             self.processing_class.apply_chat_template(
                 prompt, tokenize=False, add_generation_prompt=True
@@ -548,12 +566,6 @@ class TimeR1_Trainer_ft(Trainer):
             for prompt in prompts
         ]
 
-        video_inputs = [x["video_inputs"] for x in inputs]
-        fps_inputs = [x["video_kwargs"]["fps"] for x in inputs]
-
-        # only support bs==1
-        video_inputs = video_inputs[0]
-        fps_inputs = fps_inputs[0]
         image_inputs = None
 
         prompt_inputs = self.processing_class(
@@ -581,7 +593,7 @@ class TimeR1_Trainer_ft(Trainer):
             prompt_completion_ids = unwrapped_model.generate(
                 **prompt_inputs,
                 generation_config=self.generation_config,
-                use_model_defaults=False,
+                # use_model_defaults=False,
             )
 
             prompt_length = prompt_ids.size(1)
@@ -619,10 +631,7 @@ class TimeR1_Trainer_ft(Trainer):
         )
         # Get rid of the prompt (-1 because of the shift done in get_per_token_logps)
         per_token_logps = per_token_logps[:, prompt_length - 1 :]
-
-        # depart completion
-        entropy_completion = per_token_entropy[:, prompt_length - 1 :]
-
+        
         if self.beta != 0.0:
             with torch.inference_mode():
                 if self.ref_model is not None:
@@ -661,35 +670,80 @@ class TimeR1_Trainer_ft(Trainer):
                 for completion in completions
             ]
 
+        #### Reverse video:
+        reverse_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video",
+                        "video": inputs[0]["video_reverse_path"],
+                        "total_pixels": 3584 * 28 * 28,
+                        "min_pixels": 16 * 28 * 28,
+                    },
+                ],
+            }
+        ]
+        reverse_image_inputs, reverse_video_inputs, reverse_video_kwargs = process_vision_info_v3(
+            [reverse_messages], return_video_kwargs=True
+        )
+        reverse_fps_inputs = reverse_video_kwargs["fps"]
+
+        reverse_prompts = [self.make_conversation_video(example) for example in inputs]
+
+        reverse_prompts_text = [
+            self.processing_class.apply_chat_template(
+                prompt, tokenize=False, add_generation_prompt=True
+            )
+            for prompt in reverse_prompts
+        ]
+
+        reverse_image_inputs = None
+
+        reverse_prompt_inputs = self.processing_class(
+            text=[reverse_prompts_text[0]],
+            images=reverse_image_inputs,
+            videos=[reverse_video_inputs[0]],
+            fps=[reverse_fps_inputs[0]],
+            padding=True,
+            return_tensors="pt",
+            padding_side="left",
+            add_special_tokens=False,
+        )
+
+        reverse_prompt_inputs = super()._prepare_inputs(reverse_prompt_inputs)
+
+        reverse_prompt_ids, reverse_prompt_mask = (
+            reverse_prompt_inputs["input_ids"],
+            reverse_prompt_inputs["attention_mask"],
+        )
+
+        # Generate completions
+        with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+            reverse_prompt_completion_ids = unwrapped_model.generate(
+                **reverse_prompt_inputs,
+                generation_config=self.reverse_generation_config,
+                # use_model_defaults=False,
+            )
+
+            reverse_prompt_length = reverse_prompt_ids.size(1)
+            reverse_prompt_ids = reverse_prompt_completion_ids[:, :reverse_prompt_length]
+            reverse_completion_ids = reverse_prompt_completion_ids[:, reverse_prompt_length:]
+            reverse_prompt_mask = reverse_prompt_mask.repeat_interleave(self.num_generations, dim=0)
+        reverse_completions = self.processing_class.batch_decode(
+            reverse_completion_ids, skip_special_tokens=True
+        )
+        if is_conversational(inputs[0]):
+            reverse_completions = [
+                [{"role": "assistant", "content": completion}]
+                for completion in reverse_completions
+            ]
+
         # Compute the rewards
         prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]
-
         rewards_per_func = torch.zeros(
             len(prompts), len(self.reward_funcs), device=device
         )
-        metrics_per_func = torch.zeros(
-            len(prompts), len(self.metric_funcs), device=device
-        )
-        for i, metric_func in enumerate(self.metric_funcs):
-            # Repeat all input columns (but "prompt" and "completion") to match the number of generations
-            metric_kwargs = {
-                key: []
-                for key in inputs[0].keys()
-                if key not in ["prompt", "completion"]
-            }
-            for key in metric_kwargs:
-                for example in inputs:
-                    # Repeat each value in the column for `num_generations` times
-                    metric_kwargs[key].extend([example[key]] * self.num_generations)
-            # print(reward_kwargs)
-            output_metric_func = metric_func(
-                prompts=prompts, completions=completions, **metric_kwargs
-            )
-            # output_metric_func = [metric if metric is not None else torch.nan for metric in output_metric_func]
-            metrics_per_func[:, i] = torch.tensor(
-                output_metric_func, dtype=torch.float32, device=device
-            )
-
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
@@ -716,8 +770,26 @@ class TimeR1_Trainer_ft(Trainer):
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[
                         :, 0
                     ]  # Shape (B*G,)
+            elif reward_func.__name__ == "llm_reward":
+                reward_kwargs = {
+                    key: []
+                    for key in inputs[0].keys()
+                    if key not in ["prompt", "completion"]
+                }
+                solution = inputs[0]['solution']
+                solutions = [solution for _ in range(self.num_generations)]
+                duration = inputs[0]['durations']
+                durations = [duration for _ in range(self.num_generations)]
+                both_completions = completions + reverse_completions * self.num_generations
+                
+                output_reward_func, sensitivity, ious = reward_func(
+                    sentence=sentence, completions=both_completions, solutions=solutions, durations=durations, alpha_coeff=self.alpha_coeff, sensitivity=sensitivity
+                )
+                
+                rewards_per_func[:, i] = torch.tensor(
+                    output_reward_func, dtype=torch.float32, device=device
+                )
             else:
-                # Repeat all input columns (but "prompt" and "completion") to match the number of generations
                 reward_kwargs = {
                     key: []
                     for key in inputs[0].keys()
@@ -725,13 +797,10 @@ class TimeR1_Trainer_ft(Trainer):
                 }
                 for key in reward_kwargs:
                     for example in inputs:
-                        # Repeat each value in the column for `num_generations` times
                         reward_kwargs[key].extend([example[key]] * self.num_generations)
-                # print(reward_kwargs)
                 output_reward_func = reward_func(
                     prompts=prompts, completions=completions, **reward_kwargs
                 )
-                # output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
                 rewards_per_func[:, i] = torch.tensor(
                     output_reward_func, dtype=torch.float32, device=device
                 )
@@ -739,23 +808,41 @@ class TimeR1_Trainer_ft(Trainer):
         # Sum the rewards from all reward functions
         rewards = rewards_per_func.sum(dim=1)
 
-        # Compute grouped-wise rewards
-        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
-        std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
+        original_prompt_completion_ids = prompt_completion_ids
+        original_completion_mask = completion_mask
+        original_per_token_logps = per_token_logps
+        original_rewards = rewards
+        if self.beta != 0.0:
+            original_ref_per_token_logps = ref_per_token_logps
 
+        num_rollout = self.num_generations
+        entropy_completion = per_token_entropy[:, prompt_length - 1 :]
+        # Compute grouped-wise rewards
+        mean_grouped_rewards = rewards.view(-1, num_rollout).mean(dim=1)
+        std_grouped_rewards = rewards.view(-1, num_rollout).std(dim=1)
         # Normalize the rewards to compute the advantages
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(
-            self.num_generations, dim=0
+            num_rollout, dim=0
         )
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(
-            self.num_generations, dim=0
+            num_rollout, dim=0
         )
         advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+
+        
 
         if self.use_grpo:
             per_token_loss = torch.exp(
                 per_token_logps - per_token_logps.detach()
             ) * advantages.unsqueeze(1)
+            print("per_token_loss", per_token_loss.shape)
+            print("completion_mask", completion_mask.shape)
+
+            if self.args.adv_adjust:
+                iou_tensor = torch.tensor(ious, device=per_token_loss.device, dtype=per_token_loss.dtype)
+                miou = torch.mean(iou_tensor)
+                if self.args.adv_adjust_miou == 'exp':
+                    per_token_loss = (torch.exp((1 - miou) / self.args.tau)) * per_token_loss
 
             if self.beta != 0.0:
                 per_token_loss = -(per_token_loss - self.beta * per_token_kl)
@@ -776,8 +863,6 @@ class TimeR1_Trainer_ft(Trainer):
             if self.beta != 0.0:
                 per_token_loss = per_token_loss + self.beta * per_token_kl
             loss = (per_token_loss * completion_mask).sum() / completion_mask.sum()
-
-        # Log the metrics
         completion_length = (
             self.accelerator.gather_for_metrics(completion_mask.sum(1))
             .float()
@@ -785,14 +870,6 @@ class TimeR1_Trainer_ft(Trainer):
             .item()
         )
         self._metrics["completion_length"].append(completion_length)
-
-        metrics_per_func = self.accelerator.gather_for_metrics(metrics_per_func).mean(0)
-        for i, metric_func in enumerate(self.metric_funcs):
-            metric_func_name = metric_func.__name__
-            self._metrics[f"metrics/{metric_func_name}"].append(
-                metrics_per_func[i].item()
-            )
-
         reward_per_func = self.accelerator.gather_for_metrics(rewards_per_func).mean(0)
         for i, reward_func in enumerate(self.reward_funcs):
             if isinstance(reward_func, PreTrainedModel):
@@ -802,14 +879,12 @@ class TimeR1_Trainer_ft(Trainer):
             self._metrics[f"rewards/{reward_func_name}"].append(
                 reward_per_func[i].item()
             )
-
         self._metrics["reward"].append(
             self.accelerator.gather_for_metrics(rewards).mean().item()
         )
         self._metrics["reward_std"].append(
             self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item()
         )
-
         if self.beta != 0.0:
             mean_kl = (
                 (per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)
@@ -817,43 +892,9 @@ class TimeR1_Trainer_ft(Trainer):
             self._metrics["kl"].append(
                 self.accelerator.gather_for_metrics(mean_kl).mean().item()
             )
-        # Compute the clipped probability ratios
-        is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (advantages.unsqueeze(1) < 0)
-        is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (
-            advantages.unsqueeze(1) > 0
-        )
-        is_region_clipped = is_low_clipped | is_high_clipped
-
-        low_clip = (is_low_clipped * completion_mask).sum() / completion_mask.sum()
-        high_clip = (is_high_clipped * completion_mask).sum() / completion_mask.sum()
-        clip_ratio = (is_region_clipped * completion_mask).sum() / completion_mask.sum()
-
-        gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
-        self._metrics["clip_ratio/low_mean"].append(gathered_low_clip.nanmean().item())
-        self._metrics["clip_ratio/low_min"].append(nanmin(gathered_low_clip).item())
-        gathered_high_clip = self.accelerator.gather_for_metrics(high_clip)
-        self._metrics["clip_ratio/high_mean"].append(
-            gathered_high_clip.nanmean().item()
-        )
-        self._metrics["clip_ratio/high_max"].append(nanmax(gathered_high_clip).item())
-        gathered_clip_ratio = self.accelerator.gather_for_metrics(clip_ratio)
-        self._metrics["clip_ratio/region_mean"].append(
-            gathered_clip_ratio.nanmean().item()
-        )
-
-        completion_lengths = completion_mask.sum(dim=1).clamp(min=1)
-        mean_completion_entropy = (entropy_completion * completion_mask).sum(
-            dim=1
-        ) / completion_lengths
-        # calc mean entropy per batch
-        batch_mean_entropy = mean_completion_entropy.mean()
-        self._metrics["generation_entropy"].append(
-            self.accelerator.gather_for_metrics(batch_mean_entropy).mean().item()
-        )
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
         return loss
 
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:

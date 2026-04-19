@@ -2,58 +2,109 @@
 
 We study the temporal directionality problem in Grounding Events in Videos. Specifically, we enable Vision-Language Models to capture the intrinsic temporal structure of events by distinguishing between time-sensitive and time-insensitive semantics. In this work, we utilize a reinforcement learning framework to optimize the model's policy and design a temporal directionality reward to ensure the effective discrimination of event validity across forward and reversed videos.
 
-<div style='display:flex; gap: 0.25rem; '>
+<div style='display:flex; gap: 0.25rem;'>
   <a href='https://arxiv.org/pdf/2601.06559v1'><img src='https://img.shields.io/badge/Paper-PDF-red'></a>
-  <a href='ParadiseYu/ArrowGEV-7B'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_7B-blue'></a>
-  <a href='https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data/tree/main/Arrow-R1-Eval/Training'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_dataset-blue'></a>
+  <a href='https://huggingface.co/ParadiseYu/ArrowGEV-7B'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_7B-blue'></a>
+  <a href='https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_Data-blue'></a>
 </div>
 
 <p align="center" width="100%">
-<a target="_blank"><img src="assets/main_arch.png" alt="Paradigm Comparisons on VideoQA" style="width: 80%; min-width: 200px; display: block; margin: auto;"></a>
+<a target="_blank"><img src="assets/main_arch.png" alt="ArrowGEV overview" style="width: 80%; min-width: 200px; display: block; margin: auto;"></a>
 </p>
+
+## Contents
+- [Overview](#overview)
+- [Setup](#setup)
+- [Dataset](#dataset)
+- [Training](#training)
+- [Acknowledgements](#acknowledgements)
+- [Citation](#citation)
+
+## Overview
+
+ArrowGEV builds on Qwen2.5-VL and optimizes a policy with Group Relative Policy Optimization (GRPO) using a temporal directionality reward. For each training sample we generate predictions on both the forward video and its reversed counterpart and compute:
+
+- An **IoU reward** that measures how well the predicted window matches the ground-truth window.
+- A **temporal-directionality reward** that penalizes windows that remain valid under time reversal for time-sensitive events, and rewards consistent windows for time-insensitive events. Event sensitivity is judged either by an offline label or by a reward model (e.g. Qwen2.5-VL-72B) queried via an OpenAI-compatible server.
+- A **format reward** that enforces the `<think>...</think><answer>start to end</answer>` output structure.
+
+The trainer is implemented in [src/arrowgev/rl/arrowgev_trainer.py](src/arrowgev/rl/arrowgev_trainer.py).
 
 ## Setup
 
-### Install
-see [docs/INSTALL.md](./docs/INSTALL.md)
+Clone the repository and create a fresh environment:
 
-### Dataset
-
-Download the video data following [docs/DATA.md](./docs/DATA.md), and use our data annotation [ArrowGEV-Data](https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data/tree/main/Arrow-R1-Eval/Training)
-
-## Training
-
-**1) Download this GitHub**
-```
-git clone https://github.com/Yu-Fangxu/ArrowGEV.git
-```
-
-**2) Setup Environment**
-
-We recommend creating a new environment:
 ```bash
-conda create -n ArrowGEV python==3.10
-conda activate ArrowGEV
-```
+git clone https://github.com/Yu-Fangxu/ArrowGEV.git
+cd ArrowGEV
 
-Then install all the dependencies:
-```
+conda create -n ArrowGEV python=3.10.12 -y
+conda activate ArrowGEV
+
 pip install -r requirements.txt
 ```
 
-**3) Run Command for EACL**
+Key pinned versions (CUDA 12.4): `torch==2.6.0`, `transformers==4.51.1`, `vllm==0.8.4`, `trl==0.17.0`, `numba==0.61.2`. See [docs/INSTALL.md](docs/INSTALL.md) for details — these versions matter for both training and vLLM inference.
+
+## Dataset
+
+Follow [docs/DATA.md](docs/DATA.md) to download and organize the training data. The default layout expected by the scripts is:
 
 ```
+dataset/
+└── ArrowGEV/
+    ├── annotations/train_2k5.json
+    └── videos/arrowgev_data/
+```
+
+Annotations and videos are published as [ParadiseYu/ArrowGEV-Data](https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data), and can also be reassembled from the original source datasets ([VTG-IT](https://huggingface.co/datasets/Yongxin-Guo/VTG-IT), [TimeIT](https://huggingface.co/datasets/ShuhuaiRen/TimeIT), [HTStep](https://openreview.net/pdf?id=vv3cocNsEK), [LongVid](https://huggingface.co/datasets/OpenGVLab/LongVid)).
+
+Reversed-video copies are required for the temporal directionality reward. Generate them once with:
+
+```bash
+python reverse_video.py \
+    --input_folder  dataset/ArrowGEV/videos/arrowgev_data \
+    --output_folder dataset/ArrowGEV/videos/arrowgev_data
+```
+
+## Training
+
+Run RL post-training with the paper's dynamic sample-filtering curriculum:
+
+```bash
 bash scripts/posttrain/train_rl_SF.sh
 ```
 
-## Acknowledgements
+Each outer iteration (1) trains one epoch of GRPO, (2) scores every sample on the current working set by running the new checkpoint with vLLM, and (3) drops "mastered" samples where IoU > η. The next iteration resumes from the latest checkpoint on the smaller set. Defaults match the paper (5 iterations, η ≈ 0.70); override via:
 
-We thank the following projects: [Time-R1](https://github.com/xiaomi-research/time-r1), [Video-R1](https://github.com/tulerfeng/Video-R1).
+```bash
+NUM_FILTER_ITERS=5 \
+FILTER_THRESHOLD=0070_all \   # "NNNN_all" -> eta = NN.NN/100, e.g. 0071_all -> 0.71
+FILTER_K=2500 \
+NUM_EPOCHS_PER_ITER=1 \
+bash scripts/posttrain/train_rl_SF.sh
+```
+
+The script launches distributed training across 8 GPUs (override with `GPU_LIST`) and uses DeepSpeed ZeRO-3 offload (`scripts/zero3_offload.json`). Key flags documented in [main.py](main.py):
+
+| Flag | Meaning |
+| --- | --- |
+| `--train_data_path` | JSON annotations (each item has `video`, `video_reverse_path`, `timestamp`, `sentence`, `duration`, `sensitive`) |
+| `--video_folder` | Root directory containing the videos |
+| `--reward_funcs` | Any subset of `iou`, `format`, `llm_reward` |
+| `--alpha_coeff` | Weight of the reverse-video term in the temporal reward |
+| `--num_generations` | GRPO group size (forward + reverse roll-outs) |
+
+The `llm_reward` function in [main.py](main.py) queries an OpenAI-compatible reward model. Configure it with:
+
+```bash
+export ARROWGEV_RM_BASE_URLS="http://host-a:8000/v1,http://host-b:8001/v1"
+export ARROWGEV_RM_MODEL="/path/to/Qwen2.5-VL-72B-Instruct"
+```
 
 ## Citation
 
-If you find our work useful, please consider cite our paper：
+If you find our work useful, please consider citing:
 
 ```bibtex
 @article{yu2026arrowgev,

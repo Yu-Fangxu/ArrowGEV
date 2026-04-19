@@ -1,77 +1,79 @@
+"""Produce a time-reversed copy of every video in a folder.
+
+The reversed clips are used as negatives for the temporal directionality
+reward during training. Output files are named ``<stem>_reverse.mp4``.
+
+Example:
+    python reverse_video.py \\
+        --input_folder  dataset/ArrowGEV/videos/arrowgev_data \\
+        --output_folder dataset/ArrowGEV/videos/arrowgev_data
+"""
+
+import argparse
 import os
-import cv2
 from pathlib import Path
+
+import cv2
 from tqdm import tqdm
-def reverse_and_concat(input_path, output_path):
-    """
-    1. 倒放视频
-    2. 将倒放视频拼接到原视频末尾
-    3. 保存为 *_reverse.mp4
-    """
-    # 读取原视频
+
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
+
+
+def reverse_video(input_path: str, output_path: str) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
-        raise ValueError(f"无法打开视频: {input_path}")
+        raise ValueError(f"Cannot open video: {input_path}")
 
-    # 获取视频参数
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
-    # 读取所有帧
-    original_frames = []
+    frames = []
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        original_frames.append(frame)
+        frames.append(frame)
     cap.release()
 
-    # 倒放帧
-    reversed_frames = original_frames[::-1]
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    for frame in reversed(frames):
+        writer.write(frame)
+    writer.release()
 
-    # 拼接原视频和倒放视频
-    # combined_frames = original_frames + reversed_frames
-    combined_frames = reversed_frames # only reversed
 
-    # 写入新视频
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    for frame in combined_frames:
-        out.write(frame)
-    out.release()
-
-def process_folder(input_dir, output_dir=None):
-    """批量处理文件夹中的所有视频"""
-    if output_dir is None:
-        output_dir = input_dir
+def process_folder(input_dir: str, output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
-
-    video_exts = ['.mp4', '.avi', '.mov', '.mkv']
-
-    for file in tqdm(os.listdir(input_dir)):
-        filepath = os.path.join(input_dir, file)
-        ext = Path(file).suffix.lower()
-        if ext not in video_exts:
+    for name in tqdm(os.listdir(input_dir)):
+        src = os.path.join(input_dir, name)
+        if Path(name).suffix.lower() not in VIDEO_EXTS:
             continue
-
+        dst = os.path.join(output_dir, f"{Path(name).stem}_reverse.mp4")
         try:
-            # 生成输出路径
-            output_name = f"{Path(file).stem}_reverse_only.mp4"  # 强制使用.mp4后缀
-            output_path = os.path.join(output_dir, output_name)
+            reverse_video(src, dst)
+        except Exception as err:
+            print(f"Failed on {name}: {err}")
 
-            # 处理视频
-            reverse_and_concat(filepath, output_path)
-            print(f"成功处理: {file} -> {output_name}")
 
-        except Exception as e:
-            print(f"处理失败 {file}: {str(e)}")
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input_folder", required=True, help="Folder of source videos.")
+    parser.add_argument(
+        "--output_folder",
+        default=None,
+        help="Where to write reversed clips (defaults to --input_folder).",
+    )
+    args = parser.parse_args()
+
+    input_folder = args.input_folder
+    output_folder = args.output_folder or input_folder
+    if not os.path.isdir(input_folder):
+        raise SystemExit(f"Input folder does not exist: {input_folder}")
+
+    process_folder(input_folder, output_folder)
+    print("Done.")
+
 
 if __name__ == "__main__":
-    input_folder = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/timer1/videos/timerft_data"
-    output_folder =  "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/timer1/videos/timerft_data"
-    if not os.path.isdir(input_folder):
-        print("错误: 路径无效")
-    else:
-        process_folder(input_folder, output_folder)
-        print("全部处理完成！")
+    main()

@@ -1,12 +1,22 @@
 # Installation
 
-See all package versions in requirements.txt
+Create a fresh environment and install the pinned dependencies:
 
 ```bash
-conda create -n timer1 python=3.10.12
-pip install requirements.txt
-conda activate timer1
+conda create -n ArrowGEV python=3.10.12 -y
+conda activate ArrowGEV
+pip install -r requirements.txt
 ```
 
-Note that we use `vllm==0.8.4 transformers==4.51.1 numba==0.61.2  trl==0.17.0 torch==2.6.0`, with CUDA version of `12.4`. 
-The versions are important for bug-free training and inference!
+The following versions must match for bug-free training and vLLM inference:
+
+| Package | Version |
+| --- | --- |
+| CUDA | 12.4 |
+| torch | 2.6.0 |
+| transformers | 4.51.1 |
+| vllm | 0.8.4 |
+| trl | 0.17.0 |
+| numba | 0.61.2 |
+
+See `requirements.txt` for the complete list.

@@ -4,7 +4,8 @@ import os
 import re
 
 import numpy as np
-from data_loader import load_tvgbench_filter
+
+from src.vllm_inference.data.data_loader import load_tvgbench_filter
 
 
 def compute_IoU(pred, gt):
@@ -76,8 +77,7 @@ def calc_score(difficulty_data_dict):
 
 def main(input_dir=None, split="p03c_v2_top_2500", output_dir=None):
     original_data = load_tvgbench_filter(split=split)
-    difficulty_data_dict = load_new_data(f"{input_dir}")
-    # steps = input_dir.split('_')[-1]
+    difficulty_data_dict = load_new_data(input_dir)
 
     print(len(difficulty_data_dict))
     calc_score(difficulty_data_dict)
@@ -90,16 +90,10 @@ def main(input_dir=None, split="p03c_v2_top_2500", output_dir=None):
             new_data.append(itm)
 
     if len(new_data) != len(original_data):
-        print("Not All!! Attention!!")
+        print("Warning: not every sample in the annotation had a prediction.")
 
-    # if not os.path.exists(f"{output_dir}/{input_dir}"):
-    #     os.makedirs(f"{output_dir}/{input_dir}")
-    # path_name = f"{output_dir}/{input_dir}/train_v4_cloud.json"
-
-    if not os.path.exists(f"{input_dir}"):
-        os.makedirs(f"{input_dir}")
-    path_name = f"{input_dir}/train_v4_cloud.json"
-
+    os.makedirs(input_dir, exist_ok=True)
+    path_name = os.path.join(input_dir, "train_v4_cloud.json")
     with open(path_name, "w") as f:
         json.dump(new_data, f)
 
@@ -107,9 +101,11 @@ def main(input_dir=None, split="p03c_v2_top_2500", output_dir=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="")  # Updated description
-    parser.add_argument("--input", help="logging file")
-    parser.add_argument("--split", help="annotation loading")
-    parser.add_argument("--output_dir")
+    parser = argparse.ArgumentParser(
+        description="Score evaluation shards and dump a difficulty-annotated JSON."
+    )
+    parser.add_argument("--input", help="Directory containing *.jsonl eval shards.")
+    parser.add_argument("--split", help="Annotation split passed to load_tvgbench_filter.")
+    parser.add_argument("--output_dir", help="Unused (kept for compatibility).")
     args = parser.parse_args()
     main(input_dir=args.input, split=args.split, output_dir=args.output_dir)

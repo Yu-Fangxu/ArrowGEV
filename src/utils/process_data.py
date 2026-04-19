@@ -3,6 +3,7 @@ import json
 import math
 import os
 import random
+import re
 
 import numpy as np
 import torch
@@ -107,6 +108,19 @@ def gaussian_sample(data_list, k, output_path, description, center=0.3, std_dev=
         print(f"{e}")
 
 
+def _parse_threshold_task(task):
+    """Match ``NNNN_all`` task names to a fractional IoU threshold.
+
+    ``0070_all`` -> 0.70   (keep samples with 0 < IoU <= 0.70)
+    ``0071_all`` -> 0.71
+    ``0080_all`` -> 0.80
+    """
+    m = re.fullmatch(r"(\d{4})_all", task)
+    if not m:
+        return None
+    return int(m.group(1)) / 100.0  # e.g. "0071" -> 0.71
+
+
 def process_ddata(input_json_path, output_prefix, task, k=2500):
     try:
         with open(input_json_path, "r", encoding="utf-8") as f:
@@ -124,17 +138,19 @@ def process_ddata(input_json_path, output_prefix, task, k=2500):
             )
     if len(valid_items) == 0:
         return
-    print(f"valid data: {len(valid_items)}条 (original: {len(data)}条)")
+    print(f"valid data: {len(valid_items)} items (original: {len(data)})")
 
-    if task == "0070_all":
-        subset = [item for item in valid_items if 0 < item["p_value"] <= 0.7]
+    threshold = _parse_threshold_task(task)
+    if threshold is not None:
+        # Paper's "dynamic difficulty filter": drop samples the policy has already
+        # mastered (IoU > threshold) and keep the rest for the next epoch.
+        subset = [item for item in valid_items if 0 < item["p_value"] <= threshold]
         difficulty_sorted_sample(
             subset,
             k,
-            f"{output_prefix}_0070_all.json",
-            "(0 < p <= 0.7)",
+            f"{output_prefix}_{task}.json",
+            f"(0 < p <= {threshold:.2f})",
         )
-
     elif task == "gaussian_03":
         subset = [item for item in valid_items if item["p_value"] > 0]
         gaussian_sample(
@@ -145,8 +161,10 @@ def process_ddata(input_json_path, output_prefix, task, k=2500):
         )
     elif task == "random_sample":
         random_sample(valid_items, k, f"{output_prefix}_random.json", "random_sample")
+    else:
+        raise ValueError(f"Unknown filtering task: {task!r}")
 
-    print("\n finished")
+    print("Done.")
 
 
 if __name__ == "__main__":

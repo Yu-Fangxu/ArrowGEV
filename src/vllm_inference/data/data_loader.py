@@ -4,9 +4,13 @@ import os
 import datasets
 import pandas as pd
 
+# Root of the dataset directory. Override with the ARROWGEV_DATASET_ROOT
+# environment variable if your layout differs from the default ./dataset.
+DATASET_ROOT = os.environ.get("ARROWGEV_DATASET_ROOT", "./dataset")
+
 
 def load_activitynet(split="test"):
-    data_root = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/activitynet"
+    data_root = os.path.join(DATASET_ROOT, "activitynet")
     data_path = f"{data_root}/annotations/sentence_temporal_grounding/{split}.json"
     data = json.load(open(data_path))
     qid, conv_data = 0, []
@@ -15,7 +19,6 @@ def load_activitynet(split="test"):
         video_path = None
         for ext in ["mp4", "mkv", "webm"]:
             tmp = os.path.join(f"{data_root}/videos", f"{video_id}.{ext}")
-            # tmp = os.path.join(f"{data_root}/videos_reversed", f"{video_id}.{ext}")
             if os.path.exists(tmp):
                 video_path = tmp
                 break
@@ -37,7 +40,7 @@ def load_activitynet(split="test"):
 
 
 def load_charades(split="test"):
-    data_root = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/charades"
+    data_root = os.path.join(DATASET_ROOT, "charades")
     data_path = f"{data_root}/Charades_anno/Charades_sta_{split}.json"
     if not os.path.exists(data_path):
         data = {}
@@ -68,7 +71,6 @@ def load_charades(split="test"):
     qid, conv_data = 0, []
     for video_id, meta_data in data.items():
         video_path = os.path.join(f"{data_root}/Charades_v1", f"{video_id}.mp4")
-        # video_path = os.path.join(f"{data_root}/Charades_v1_reversed", f"{video_id}.mp4")
         for i in range(len(meta_data["timestamps"])):
             conv_data.append(
                 {
@@ -85,30 +87,30 @@ def load_charades(split="test"):
 
 
 def load_tvgbench_filter(split):
+    """Load a working-set JSON used by the sample-filtering loop.
+
+    The JSON is a list of items with at least ``video``, ``duration``,
+    ``timestamp``, ``sentence``, and ``qid``. Optional fields
+    (``pred``, ``video_start``, ``video_end``) are filled with ``None`` when
+    missing so the same loader works for the raw training annotation
+    (before inference) and for the scored JSON produced between iterations.
+    """
     data_path = split
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    qid, conv_data = 0, []
+    conv_data = []
     for meta_data in data:
-        video = meta_data["video"]
-        duration = meta_data["duration"]
-        timestamps = meta_data["timestamp"]
-        sentences = meta_data["sentence"]
-        qid = meta_data["qid"]
-        pred = meta_data["pred"]
-        video_start = meta_data["video_start"]
-        video_end = meta_data["video_end"]
         conv_data.append(
             {
-                "video": video,
-                "duration": duration,
-                "timestamp": timestamps,
-                "pred": pred,
-                "sentence": sentences,
-                "qid": qid,
-                "video_start": video_start,
-                "video_end": video_end,
+                "video": meta_data["video"],
+                "duration": meta_data["duration"],
+                "timestamp": meta_data["timestamp"],
+                "pred": meta_data.get("pred"),
+                "sentence": meta_data["sentence"],
+                "qid": meta_data["qid"],
+                "video_start": meta_data.get("video_start"),
+                "video_end": meta_data.get("video_end"),
             }
         )
 
@@ -116,18 +118,12 @@ def load_tvgbench_filter(split):
 
 
 def load_tvgbench(split="default"):
-    """
-    Load JSON data in TVGBench format.
+    """Load JSON data in TVGBench format.
 
-    Args:
-        data_path (str): Path to the JSON file in TVGBench format.
-
-    Returns:
-        list: A list containing processed data, where each element is a dictionary
-            in the format {'video': str, 'duration': float, 'timestamp': list[float, float], 'sentence': str, 'qid': str}.
-            Returns an empty list if the file does not exist or cannot be parsed.
+    Returns a list of dicts with keys
+    ``{'video', 'duration', 'timestamp', 'sentence', 'qid', 'start', 'end'}``.
     """
-    data_path = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/timer1/annotations/tvgbench.json"
+    data_path = os.path.join(DATASET_ROOT, "ArrowGEV", "annotations", "tvgbench.json")
 
     with open(data_path, "r") as f:
         raw_data = json.load(f)
@@ -185,7 +181,7 @@ def load_videomme(split="default"):
     if split in ["test", "train"]:
         split = "default"
     assert split in ["short", "medium", "long", "default"]
-    data_root = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/videomme"
+    data_root = os.path.join(DATASET_ROOT, "videomme")
     data_path = f"{data_root}/videomme"
 
     conv_data = []
@@ -213,7 +209,7 @@ def load_egoschema(split="default"):
     if split in ["test", "train"]:
         split = "default"
     assert split in ["default", "subset"]
-    data_root = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/egoschema"
+    data_root = os.path.join(DATASET_ROOT, "egoschema")
     if split == "subset":
         data_path = f"{data_root}/Subset"
     else:
@@ -243,7 +239,7 @@ def load_tempcompass(split="default"):
     if split in ["test", "train", "default"]:
         split = "multi-choice"
     assert split in ["multi-choice", "captioning", "caption_matching", "yes_no"]
-    data_root = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/tempcompass"
+    data_root = os.path.join(DATASET_ROOT, "tempcompass")
     data_path = f"{data_root}/questions/{split}.json"
 
     conv_data = []
@@ -287,7 +283,7 @@ def load_tempcompass(split="default"):
 
 
 def load_mvbench(split="default"):
-    data_root = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/dataset/mvbench"
+    data_root = os.path.join(DATASET_ROOT, "mvbench")
     data_path = f"{data_root}/json"
 
     DATASET_CONFIG = {

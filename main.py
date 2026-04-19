@@ -1,31 +1,23 @@
+import base64
+import concurrent.futures
+import itertools
 import json
 import math
 import os
 import random
 import re
-from typing import List, Optional
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
+from string import Template
+from typing import List, Optional
 
-import json
-import random
-import math
-import sys
-import concurrent.futures
-import itertools
-
-sys.path.append('/home/ershisui/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/ziyaolu/multimodal/code/VLM-R1/')
-
-from openai import OpenAI
-
-# ----------------------- Fix the flash attention bug in the current version of transformers -----------------------
-import torch
 import numpy as np
+import torch
 from datasets import Dataset
 from deepspeed.runtime.fp16.loss_scaler import LossScaler
 from deepspeed.runtime.zero.config import ZeroStageEnum
+from openai import OpenAI
 from rouge_score import rouge_scorer
-from src.time_r1 import TimeR1_Trainer
 from tqdm import tqdm
 from transformers import (
     TrainerCallback,
@@ -34,14 +26,16 @@ from transformers import (
     TrainingArguments,
 )
 from trl import GRPOConfig, ModelConfig, ScriptArguments, TrlParser, get_peft_config
-from string import Template
+
+from src.arrowgev import ArrowGEV_Trainer
 
 torch.serialization.add_safe_globals([ZeroStageEnum])
 torch.serialization.add_safe_globals([LossScaler])
 
+
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
 RM_PROMPT = """
 **You are an AI assistant specializing in the analysis of temporal properties of events.**
@@ -75,15 +69,20 @@ Now, please output your result below in a JSON format by filling in the placehol
 }
 """
 
-import base64
-openai_api_key = "EMPTY"
-openai_api_base = "http://{openai_ip}:{port}/v1"
-clients = [
-OpenAI(
-api_key=openai_api_key,
-base_url=f"http://29.226.50.232:{port}/v1"
-) for port in [8000, 8001, 8002, 8003]
+RM_SYSTEM = "You are a helpful assistant."
+
+# Reward-model endpoints (OpenAI-compatible). Configure via environment variables:
+#   ARROWGEV_RM_BASE_URLS  comma-separated list of base URLs, e.g. "http://host:8000/v1,http://host:8001/v1"
+#   ARROWGEV_RM_MODEL      model id / local path served by those endpoints
+#   ARROWGEV_RM_API_KEY    API key (defaults to "EMPTY" for self-hosted vLLM/SGLang servers)
+_RM_BASE_URLS = [
+    u.strip()
+    for u in os.environ.get("ARROWGEV_RM_BASE_URLS", "").split(",")
+    if u.strip()
 ]
+_RM_API_KEY = os.environ.get("ARROWGEV_RM_API_KEY", "EMPTY")
+_RM_MODEL = os.environ.get("ARROWGEV_RM_MODEL", "")
+clients = [OpenAI(api_key=_RM_API_KEY, base_url=url) for url in _RM_BASE_URLS]
 
 def calculate_iou(interval1_start, interval1_end, interval2_start, interval2_end, duration):
     """
@@ -167,13 +166,13 @@ def llm_reward(sentence, completions, solutions, durations, alpha_coeff, sensiti
 
         response = client.chat.completions.create(
             messages=msgs,
-            model="/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/zhenzcao/img_translate/2.MLLM/3.pretrained_models/Qwen2.5-VL-72B-Instruct_new/Qwen2.5-VL-72B-Instruct/",
+            model=_RM_MODEL,
             max_tokens=4096,
             temperature=0.0,
             top_p=1.0,
             n=1,
             seed=42,
-            extra_body={'repetition_penalty': 1.05}
+            extra_body={"repetition_penalty": 1.05},
         )
         response_content = response.choices[0].message.content
         cleaned_content = response_content.strip()
@@ -201,29 +200,20 @@ def llm_reward(sentence, completions, solutions, durations, alpha_coeff, sensiti
         sol_list = []
         reasoning_list = []
         for content, rev_content, sol, duration in zip(contents, reverse_contents, solutions, durations):
-            client = next(client_cycle)
+            client = next(client_cycle) if clients else None
             parsed_times = parse_timestamp_output(content)
             parsed_times_rev = parse_timestamp_output(rev_content)
 
             start_time, end_time = 0, 0
             start_time_rev, end_time_rev = 0, 0
-            gt_start, gt_end = sol # forward temporal interval
-            reverse_start = duration - gt_end # reverse temporal interval
+            gt_start, gt_end = sol  # forward temporal interval
+            reverse_start = duration - gt_end  # reverse temporal interval
             reverse_end = duration - gt_start
             if parsed_times:
                 start_time, end_time = parsed_times
-                # from_number = start_time
-                # to_number = end_time
             if parsed_times_rev:
                 start_time_rev, end_time_rev = parsed_times_rev
-            #print("prompt", prompt)
-            #print("content", content)
-            # base64_image = encode_image(image_path)
-            # ocr = prompt.split("\n")[1].strip()
-            # location = prompt.split("at location:")[1].split(")")[0].strip()
-            # reward = 0.0
-            # Try symbolic verification first
-            # ocr_list.append(ocr)
+
             sol_list.append(sol)
 
             reasoning = "Invalid Reason."
@@ -236,15 +226,15 @@ def llm_reward(sentence, completions, solutions, durations, alpha_coeff, sensiti
             f_ground = str([gt_start, gt_end])
             r_period = str([start_time_rev, end_time_rev])
             r_ground = str([reverse_start, reverse_end])
-            if sensitivity is None:
+            if sensitivity is None and client is not None:
                 future = executor.submit(
                     get_rm_result,
                     client,
                     sentence=sentence,
-                    f_period=f_period, 
-                    f_ground=f_ground, 
-                    r_period=r_period, 
-                    r_ground=r_ground
+                    f_period=f_period,
+                    f_ground=f_ground,
+                    r_period=r_period,
+                    r_ground=r_ground,
                 )
                 futures.append(future)
 
@@ -252,41 +242,25 @@ def llm_reward(sentence, completions, solutions, durations, alpha_coeff, sensiti
             rev_content_list.append([start_time_rev, end_time_rev])
 
         rm_results = []
-        if sensitivity is None:
+        if sensitivity is None and futures:
             for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                rm_results.append(result)
+                rm_results.append(future.result())
         else:
-            result = f'{{"sensitive": "{sensitivity}"}}'
-            for _ in range(len(content_list)):
-                rm_results.append(result)
-        # assert len(rm_results) == len(ocr_list)
+            default = f'{{"sensitive": "{sensitivity or "yes"}"}}'
+            rm_results = [default] * len(content_list)
+
         assert len(rm_results) == len(content_list)
         assert len(rm_results) == len(sol_list)
-        # assert len(rm_results) == len(reasoning_list)
 
         ious = []
 
-        for rm_result, content, rev_content, sol, reasoning, duration in zip(rm_results, content_list, rev_content_list, sol_list, reasoning_list, durations):
-            """
-            <comparison_score> comparison score here </comparison_score>
-            <style_score> style score here </style_score>
-            <reasoning_score> reasoning score here </reasoning_score>
-            """
-            # print(rm_result, content, sol, reasoning)
-            # print("rm_result", rm_result)
+        for rm_result, content, rev_content, sol, reasoning, duration in zip(
+            rm_results, content_list, rev_content_list, sol_list, reasoning_list, durations
+        ):
             try:
                 rm_res = json.loads(rm_result)
-                # iou_pos = rm_res['forward_score']
-                # iou_neg = rm_res['reverse_score']
-            except:
-                rm_res = {
-                      "sensitive": "yes"
-                }
-                r_s = duration - content[1]
-                r_e = duration - content[0]
-                iou_pos = calculate_iou(content[0], content[1], gt_start, gt_end, duration)
-                iou_neg = calculate_iou(rev_content[0], rev_content[1], r_s, r_e, duration)
+            except json.JSONDecodeError:
+                rm_res = {"sensitive": "yes"}
             sensitivity = rm_res["sensitive"]
 
             gt_start, gt_end = sol
@@ -308,16 +282,20 @@ def llm_reward(sentence, completions, solutions, durations, alpha_coeff, sensiti
             
             rewards.append(reward)
             ious.append(iou_pos)
-            log_path = "/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/reward_logs/log_rev.txt"
-            
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"------- {current_time} Total reward: {reward}, sensitivity: {sensitivity}, iou_pos: {iou_pos}, iou_neg: {iou_neg} -------\n")
-                f.write(f"Candidate Interval: {content}\n")
-                f.write(f"Reverse Candidate Interval: {rev_content}\n")
-                f.write(f"Reference: {sol}\n")
-                f.write(f"Reverse Reference: {(reverse_start, reverse_end)}\n")
-                f.write(f"Forward IoU: {iou_pos}\n")
-                f.write(f"Reverse Term: {second_term}\n")
+
+            log_path = os.environ.get("LOG_PATH")
+            if log_path and os.environ.get("DEBUG_MODE") == "true":
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"------- {current_time} Total reward: {reward}, sensitivity: {sensitivity}, "
+                        f"iou_pos: {iou_pos}, iou_neg: {iou_neg} -------\n"
+                    )
+                    f.write(f"Candidate Interval: {content}\n")
+                    f.write(f"Reverse Candidate Interval: {rev_content}\n")
+                    f.write(f"Reference: {sol}\n")
+                    f.write(f"Reverse Reference: {(reverse_start, reverse_end)}\n")
+                    f.write(f"Forward IoU: {iou_pos}\n")
+                    f.write(f"Reverse Term: {second_term}\n")
     return rewards, sensitivity, ious
 
 
@@ -339,35 +317,29 @@ class MY_GRPOConfig(GRPOConfig):
         default=4096, metadata={"help": "sliding window length"}
     )
 
-    prompt_type: str = field(
-        default="v1",
-        metadata={"help": "Prompt type. Possible values: 'v1', 'v2', 'v3'"},
-    )
-
     use_grpo: bool = field(
         default=True,
         metadata={"help": "Whether to use GRPO"},
     )
     alpha_coeff: float = field(
-        default=0.5, # 设置一个默认值
-        metadata={"help": "The coefficient for balancing forward and reverse rewards in llm_reward."}
+        default=0.5,
+        metadata={"help": "Weight of the reverse-video term in llm_reward."},
     )
     local_search: bool = field(
         default=False,
         metadata={"help": "Whether to use local search."},
-    ),
+    )
     adv_adjust: bool = field(
         default=False,
-        metadata={"help": "adjust the advantage weight"},
+        metadata={"help": "Adjust the advantage weight."},
     )
-
     adv_adjust_miou: str = field(
-        default='exp',
-        metadata={"help": "How to adjust the advantage weight"},
+        default="exp",
+        metadata={"help": "How to adjust the advantage weight."},
     )
     tau: float = field(
-        default=2, # 设置一个默认值
-        metadata={"help": "The coefficient for balancing forward and reverse rewards in llm_reward."}
+        default=2.0,
+        metadata={"help": "Temperature used by the advantage adjustment."},
     )
 
 @dataclass
@@ -404,7 +376,7 @@ class GRPOScriptArguments(ScriptArguments):
     )
 
     video_folder: str = field(
-        default="./dataset/finetune/charades/Charades/Charades_v1",  # Replace with your actual video folder path
+        default="./dataset/finetune/charades/Charades/Charades_v1",
         metadata={"help": "Path to the folder containing video files."},
     )
 
@@ -419,35 +391,26 @@ class GRPOScriptArguments(ScriptArguments):
     )
 
 def parse_timestamp_output(output_string):
-    """Parses timestamp output, similar to the example code."""
-    # 1. Find all <answer>...</answer> blocks.
+    """Parse the last ``<answer>...</answer>`` block into (start, end) floats."""
     answer_matches = re.findall(r"<answer>(.*?)</answer>", output_string, re.DOTALL)
-
     if not answer_matches:
-        return None  # No <answer> tags found.
+        return None
 
-    # 2. Use the content of the *last* <answer> block.
     last_answer_content = answer_matches[-1]
-    # print("last_answer_content:", last_answer_content)
-
     matches = re.findall(
         r"(\d+\.?\d*) (to|and) (\d+\.?\d*)", last_answer_content, re.IGNORECASE
     )
     if not matches:
         return None
     last_match = matches[-1]
-    start_time = float(last_match[0])
-    end_time = float(last_match[2])
-    return start_time, end_time
+    return float(last_match[0]), float(last_match[2])
 
 
-def iou_timestamp_reward(
-    completions, solution, **kwargs
-):  # Modified reward function name and arguments
-    """Reward function that calculates IoU between predicted and ground truth timestamps."""
+def iou_timestamp_reward(completions, solution, **kwargs):
+    """Reward function that returns the IoU between predicted and GT timestamps."""
     rewards = []
     current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
-    for content, sol in zip(completions, solution):  # Added video_durations
+    for content, sol in zip(completions, solution):
 
         reward = 0.0
         parsed_times = parse_timestamp_output(content)
@@ -469,22 +432,22 @@ def iou_timestamp_reward(
 
         if os.getenv("DEBUG_MODE") == "true":
             log_path = os.getenv("LOG_PATH")
-            # log_path = log_path.removeprefix("/mnt/gemininjceph3/geminicephfs/pr-others-prctrans/fangxuyu/time-r1/")
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"Content: {content}\n")
-                f.write(f"pred second: {str(start_time)}, {str(end_time)}\n")
-                f.write(f"gt second: {str(gt_start)}, {str(gt_end)}\n")
-                f.write(
-                    f"------------- {current_time} IoU reward: {reward} -------------\n"
-                )  # Modified log message
+            if log_path:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"Content: {content}\n")
+                    f.write(f"pred second: {start_time}, {end_time}\n")
+                    f.write(f"gt second: {gt_start}, {gt_end}\n")
+                    f.write(
+                        f"------------- {current_time} IoU reward: {reward} -------------\n"
+                    )
 
     return rewards
+
 
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
     pattern = re.compile(r"<think>.*?</think>\s*<answer>.*?</answer>", re.DOTALL)
     matches = [re.fullmatch(pattern, content.strip()) for content in completions]
-    # print("matches:", matches)
     return [1.0 if match else 0.0 for match in matches]
 
 
@@ -522,7 +485,6 @@ def reward_timestep_pair(
 
         rewards.append(max(0.0, score))
 
-    print("reward_timestep_pair", rewards)
     return rewards
 
 
@@ -646,26 +608,22 @@ def diversity_reward_func(completions, num_generations=8, **kwargs):
                     total_dissimilarity += 1.0 - score
                     count += 1
                 except Exception as e:
-                    print(
-                        f"Warning: Error calculating ROUGE score: {e}. Skipping pair."
-                    )
-                    # Handle potential errors gracefully, e.g., assign neutral dissimilarity
+                    print(f"Warning: Error calculating ROUGE score: {e}. Skipping pair.")
 
             if count > 0:
                 group_rewards[j] = total_dissimilarity / count
-            else:  # Handle case with only one generation or all others failed
+            else:
                 group_rewards[j] = 0.0
 
         diversity_rewards.extend(group_rewards.tolist())
 
-    print("diversity_rewards", diversity_rewards)
     return diversity_rewards
 
 
 reward_funcs_registry = {
-    "iou": iou_timestamp_reward,  # Modified registry to use iou_timestamp_reward
+    "iou": iou_timestamp_reward,
     "format": format_reward,
-    "llm_reward": llm_reward
+    "llm_reward": llm_reward,
 }
 
 metric_funcs_registry = {
@@ -673,14 +631,12 @@ metric_funcs_registry = {
     "reward_think_length": reward_think_length,
     "reward_keyword_usage": reward_keyword_usage,
     "reward_paragraph_structure": reward_paragraph_structure,
-    # "diversity_reward_func": diversity_reward_func,
 }
 
 
 def load_json_dataset_tg(
     train_data_path, is_curriculum_learning=False, preprocessed_data_path=None
-):  # 移除了 video_folder 参数
-
+):
     def create_dataset_from_json(file_path, split_name):
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -704,18 +660,15 @@ def load_json_dataset_tg(
                 continue
 
             example = {
-                "task_type": "tg", 
+                "task_type": "tg",
                 "qid": qid,
-                "problem": sentence,  
+                "problem": sentence,
                 "choices": "",
-                "solution": (
-                    float(timestamps[0]),
-                    float(timestamps[1]),
-                ),
-                "video_path": video_path, 
+                "solution": (float(timestamps[0]), float(timestamps[1])),
+                "video_path": video_path,
                 "video_reverse_path": video_reverse_path,
-                'sensitive': sensitive,
-                "durations": duration, 
+                "sensitive": sensitive,
+                "durations": duration,
                 "video_start": video_start,
                 "video_end": video_end,
                 "preprocessed_path": "",
@@ -814,17 +767,14 @@ def main(script_args, training_args, model_args):
         script_args.is_curriculum_learning,
     )
 
-    trainer_cls = (
-        TimeR1_Trainer
-    )
-    print("using: ", trainer_cls)
+    trainer_cls = ArrowGEV_Trainer
 
     callbacks_list = []
     if script_args.is_early_stopping:
-        callbacks_list.append(StopAfterNEpochsCallback(num_epochs_to_train=training_args.num_train_epochs))
+        callbacks_list.append(
+            StopAfterNEpochsCallback(num_epochs_to_train=training_args.num_train_epochs)
+        )
 
-
-    # Initialize the GRPO trainer
     trainer = trainer_cls(
         model=model_args.model_name_or_path,
         reward_funcs=reward_funcs,
@@ -839,10 +789,8 @@ def main(script_args, training_args, model_args):
         callbacks=callbacks_list,
     )
     if torch.cuda.is_available():
-        print("Moving the model to GPU...")
-        trainer.model = trainer.model.to('cuda')
-    # Train and push the model to the Hub
-    # trainer.train()
+        trainer.model = trainer.model.to("cuda")
+
     if training_args.resume_from_checkpoint is not None:
         trainer_state_path = os.path.join(
             training_args.resume_from_checkpoint, "trainer_state.json"
@@ -863,20 +811,12 @@ def main(script_args, training_args, model_args):
 
         if hasattr(trainer, "state") and hasattr(trainer.state, "max_steps"):
             trainer.state.max_steps = max_step
-        else:
-            print(
-                "Warning: trainer.state.max_steps not found or state not fully initialized. Relying on trainer.args.max_steps."
-            )
 
-
-        print(
-            f"Resuming training from checkpoint: {training_args.resume_from_checkpoint}"
-        )
+        print(f"Resuming training from checkpoint: {training_args.resume_from_checkpoint}")
         trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     else:
         trainer.train()
 
-    # Save and push to hub
     trainer.save_model(training_args.output_dir)
     if training_args.push_to_hub:
         trainer.push_to_hub(dataset_name=script_args.dataset_name)

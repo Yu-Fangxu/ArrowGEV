@@ -13,8 +13,17 @@ from transformers import ProcessorMixin
 
 from src.utils import process_vision_info_v3
 
-from .config import *
-from .data_loader import *
+from .config import DEFAULT_MCQ_PROMPT, DEFAULT_TG_PROMPT
+from .data_loader import (
+    load_activitynet,
+    load_charades,
+    load_egoschema,
+    load_mvbench,
+    load_tempcompass,
+    load_tvgbench,
+    load_tvgbench_filter,
+    load_videomme,
+)
 
 
 @dataclass
@@ -263,18 +272,11 @@ class MultipleChoiceQADataset(BaseDataset):
         already_finished=set([]),
         dataset_names=["charades"],
         use_prepared_video=False,
-        use_r1_thinking_prompt=False,
-        prompt_type="r1",
         use_nothink=False,
         **kwargs,
     ):
         super().__init__(processor, **kwargs)
         self.prompt = prompt
-        if isinstance(prompt, dict):
-            if use_r1_thinking_prompt:
-                self.prompt = prompt[prompt_type]
-            else:
-                self.prompt = prompt["default"]
 
         # video/question/options/answer/qid
         self.data = self._load_data(dataset_names, split=split)
@@ -465,18 +467,11 @@ class TemporalGroundingDataset(BaseDataset):
         already_finished=set([]),
         dataset_names=["charades"],
         use_prepared_video=False,
-        use_r1_thinking_prompt=False,
-        prompt_type="r1",
         use_nothink=False,
         **kwargs,
     ):
         super().__init__(processor, **kwargs)
         self.prompt = prompt
-        if isinstance(prompt, dict):
-            if use_r1_thinking_prompt:
-                self.prompt = prompt[prompt_type]
-            else:
-                self.prompt = prompt["default"]
 
         # video/sentence/timestamp/qid
         self.data = self._load_data(dataset_names, split=split)
@@ -621,8 +616,6 @@ def build_dataloader(
     prompt=None,
     min_pixels=16 * 28 * 28,
     total_pixels=3584 * 28 * 28,
-    use_r1_thinking_prompt=False,
-    prompt_type="r1",
     use_nothink=False,
     use_huggingface=False,
     return_probs=False,
@@ -642,8 +635,6 @@ def build_dataloader(
         "dataset_names": dataset_names,
         "use_prepared_video": use_prepared_video,
         "sys_prompt": sys_prompt,
-        "use_r1_thinking_prompt": use_r1_thinking_prompt,
-        "prompt_type": prompt_type,
         "use_nothink": use_nothink,
     }
     if prompt is not None:
