@@ -23,7 +23,7 @@ We study the temporal directionality problem in Grounding Events in Videos. Spec
 ArrowGEV builds on Qwen2.5-VL and optimizes a policy with Group Relative Policy Optimization (GRPO) using a temporal directionality reward. For each training sample we generate predictions on both the forward video and its reversed counterpart and compute:
 
 - An **IoU reward** that measures how well the predicted window matches the ground-truth window.
-- A **temporal-directionality reward** that penalizes windows that remain valid under time reversal for time-sensitive events, and rewards consistent windows for time-insensitive events. Event sensitivity is judged either by an offline label or by a reward model (e.g. Qwen2.5-VL-72B) queried via an OpenAI-compatible server.
+- A **temporal-directionality reward** that penalizes windows that remain valid under time reversal for time-sensitive events, and rewards consistent windows for time-insensitive events. Sensitivity is taken directly from the pre-annotated `sensitive` field in the training data — no LLM judge is invoked at training time.
 - A **format reward** that enforces the `<think>...</think><answer>start to end</answer>` output structure.
 
 The trainer is implemented in [src/arrowgev/rl/arrowgev_trainer.py](src/arrowgev/rl/arrowgev_trainer.py).
@@ -89,16 +89,11 @@ The script launches distributed training across 8 GPUs (override with `GPU_LIST`
 | --- | --- |
 | `--train_data_path` | JSON annotations (each item has `video`, `video_reverse_path`, `timestamp`, `sentence`, `duration`, `sensitive`) |
 | `--video_folder` | Root directory containing the videos |
-| `--reward_funcs` | Any subset of `iou`, `format`, `llm_reward` |
-| `--alpha_coeff` | Weight of the reverse-video term in the temporal reward |
-| `--num_generations` | GRPO group size (forward + reverse roll-outs) |
+| `--reward_funcs` | Any subset of `iou`, `format`, `directionality`. The default `directionality format` matches the paper. |
+| `--alpha_coeff` | Weight of the reverse-video term in the directionality reward (default `0.5`). |
+| `--num_generations` | GRPO group size (forward + reverse roll-outs). |
 
-The `llm_reward` function in [main.py](main.py) queries an OpenAI-compatible reward model. Configure it with:
-
-```bash
-export ARROWGEV_RM_BASE_URLS="http://host-a:8000/v1,http://host-b:8001/v1"
-export ARROWGEV_RM_MODEL="/path/to/Qwen2.5-VL-72B-Instruct"
-```
+The `directionality` reward is defined in [main.py](main.py). It reads the pre-annotated `sensitive` field from each training sample and computes `IoU_forward + alpha * (1 - IoU_reverse)` for time-sensitive events, or `IoU_forward + alpha * IoU_reverse` for time-insensitive events — no external reward model is queried during training.
 
 ## Citation
 

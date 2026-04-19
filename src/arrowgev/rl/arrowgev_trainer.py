@@ -357,12 +357,6 @@ class ArrowGEV_Trainer(Trainer):
                 reward_processing_classes[i] = reward_processing_class
         self.reward_processing_classes = reward_processing_classes
 
-        # if os.path.exists(self.sensitivity_path):
-        #     with open(self.sensitivity_path, 'rb') as f:
-        #         self.sensitivity_dict = pickle.load(f)
-        # else:
-        #     self.sensitivity_dict = {}
-
         self.enable_rewind_augmentation = False
 
         self.rewind_k = 1
@@ -770,22 +764,24 @@ class ArrowGEV_Trainer(Trainer):
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[
                         :, 0
                     ]  # Shape (B*G,)
-            elif reward_func.__name__ == "llm_reward":
-                reward_kwargs = {
-                    key: []
-                    for key in inputs[0].keys()
-                    if key not in ["prompt", "completion"]
-                }
-                solution = inputs[0]['solution']
+            elif reward_func.__name__ == "directionality_reward":
+                solution = inputs[0]["solution"]
+                duration = inputs[0]["durations"]
                 solutions = [solution for _ in range(self.num_generations)]
-                duration = inputs[0]['durations']
                 durations = [duration for _ in range(self.num_generations)]
-                both_completions = completions + reverse_completions * self.num_generations
-                
-                output_reward_func, sensitivity, ious = reward_func(
-                    sentence=sentence, completions=both_completions, solutions=solutions, durations=durations, alpha_coeff=self.alpha_coeff, sensitivity=sensitivity
+                both_completions = (
+                    completions + reverse_completions * self.num_generations
                 )
-                
+
+                output_reward_func, sensitivity, ious = reward_func(
+                    sentence=sentence,
+                    completions=both_completions,
+                    solutions=solutions,
+                    durations=durations,
+                    alpha_coeff=self.alpha_coeff,
+                    sensitivity=sensitivity,
+                )
+
                 rewards_per_func[:, i] = torch.tensor(
                     output_reward_func, dtype=torch.float32, device=device
                 )

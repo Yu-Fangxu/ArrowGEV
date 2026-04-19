@@ -95,7 +95,8 @@ for (( FILTER_INDEX=0; FILTER_INDEX<NUM_FILTER_ITERS; FILTER_INDEX++ )); do
         --fix_vit true \
         --slide_window false \
         --run_name "$WANDB_NAME" \
-        --reward_funcs iou format \
+        --reward_funcs directionality format \
+        --alpha_coeff 0.5 \
         --temperature 1.0 \
         --is_curriculum_learning false \
         --logging_dir "$OUTDIR/${WANDB_NAME}" \
