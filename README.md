@@ -67,33 +67,9 @@ python reverse_video.py \
 
 ## Training
 
-Run RL post-training with the paper's dynamic sample-filtering curriculum:
-
 ```bash
 bash scripts/posttrain/train.sh
 ```
-
-Each outer iteration (1) trains one epoch of GRPO, (2) scores every sample on the current working set by running the new checkpoint with vLLM, and (3) drops "mastered" samples where IoU > η. The next iteration resumes from the latest checkpoint on the smaller set. Defaults match the paper (5 iterations, η = 0.70); override via:
-
-```bash
-NUM_FILTER_ITERS=5 \
-FILTER_THRESHOLD=0.70 \
-FILTER_K=2500 \
-NUM_EPOCHS_PER_ITER=1 \
-bash scripts/posttrain/train.sh
-```
-
-The script launches distributed training across 8 GPUs (override with `GPU_LIST`) and uses DeepSpeed ZeRO-3 offload (`scripts/zero3_offload.json`). Key flags documented in [main.py](main.py):
-
-| Flag | Meaning |
-| --- | --- |
-| `--train_data_path` | JSON annotations (each item has `video`, `video_reverse_path`, `timestamp`, `sentence`, `duration`, `sensitive`) |
-| `--video_folder` | Root directory containing the videos |
-| `--reward_funcs` | Any subset of `iou`, `format`, `directionality`. The default `directionality format` matches the paper. |
-| `--alpha_coeff` | Weight of the reverse-video term in the directionality reward (default `0.5`). |
-| `--num_generations` | GRPO group size (forward + reverse roll-outs). |
-
-The `directionality` reward is defined in [main.py](main.py). It reads the pre-annotated `sensitive` field from each training sample and computes `IoU_forward + alpha * (1 - IoU_reverse)` for time-sensitive events, or `IoU_forward + alpha * IoU_reverse` for time-insensitive events — no external reward model is queried during training.
 
 ## Citation
 
