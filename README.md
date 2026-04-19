@@ -3,7 +3,7 @@
 We study the temporal directionality problem in Grounding Events in Videos. Specifically, we enable Vision-Language Models to capture the intrinsic temporal structure of events by distinguishing between time-sensitive and time-insensitive semantics. In this work, we utilize a reinforcement learning framework to optimize the model's policy and design a temporal directionality reward to ensure the effective discrimination of event validity across forward and reversed videos.
 
 <div style='display:flex; gap: 0.25rem;'>
-  <a href='https://arxiv.org/pdf/2601.06559v1'><img src='https://img.shields.io/badge/Paper-PDF-red'></a>
+  <a href='https://arxiv.org/pdf/2601.06559'><img src='https://img.shields.io/badge/Paper-PDF-red'></a>
   <a href='https://huggingface.co/ParadiseYu/ArrowGEV-7B'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_7B-blue'></a>
   <a href='https://huggingface.co/datasets/ParadiseYu/ArrowGEV-Data'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-ArrowGEV_Data-blue'></a>
 </div>
