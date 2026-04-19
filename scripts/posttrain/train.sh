@@ -10,8 +10,7 @@
 # iterations resume from the previous iteration's filtered JSON + checkpoint.
 #
 # Paper's dynamic difficulty filter:
-#   keep sample iff 0 < IoU <= eta       (eta configurable via FILTER_THRESHOLD,
-#                                          e.g. "0070_all" -> eta=0.70)
+#   keep a sample iff 0 < IoU <= FILTER_THRESHOLD (default 0.70).
 set -euo pipefail
 
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
@@ -27,10 +26,9 @@ INIT_DATA_PATH="${INIT_DATA_PATH:-./dataset/ArrowGEV/annotations/train_2k5.json}
 INIT_MODEL_PATH="${INIT_MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}"
 VIDEO_FOLDER="${VIDEO_FOLDER:-./dataset/ArrowGEV/videos/arrowgev_data}"
 
-# "0071_all" keeps samples with 0 < IoU <= 0.71; the paper uses eta=0.70.
-FILTER_THRESHOLD="${FILTER_THRESHOLD:-0071_all}"
-FILTER_K="${FILTER_K:-2500}"          # max samples retained per iteration
-NUM_FILTER_ITERS="${NUM_FILTER_ITERS:-5}"  # paper trains for 5 epochs
+FILTER_THRESHOLD="${FILTER_THRESHOLD:-0.70}"   # keep samples with 0 < IoU <= threshold
+FILTER_K="${FILTER_K:-2500}"                   # max samples retained per iteration
+NUM_FILTER_ITERS="${NUM_FILTER_ITERS:-5}"      # paper trains for 5 epochs
 NUM_EPOCHS_PER_ITER="${NUM_EPOCHS_PER_ITER:-1}"
 
 IFS=',' read -ra gpus <<< "$GPU_LIST"
@@ -46,15 +44,15 @@ find_earliest_checkpoint() {
 }
 
 for (( FILTER_INDEX=0; FILTER_INDEX<NUM_FILTER_ITERS; FILTER_INDEX++ )); do
-    export WANDB_NAME="${EXP_NAME}_${FILTER_THRESHOLD}_filter${FILTER_INDEX}"
+    export WANDB_NAME="${EXP_NAME}_filter${FILTER_INDEX}"
 
     if [ "$FILTER_INDEX" -eq 0 ]; then
         DATA_PATH="$INIT_DATA_PATH"
         LOAD_MODEL_PATH="$INIT_MODEL_PATH"
     else
-        PREV_WANDB_NAME="${EXP_NAME}_${FILTER_THRESHOLD}_filter$((FILTER_INDEX-1))"
+        PREV_WANDB_NAME="${EXP_NAME}_filter$((FILTER_INDEX-1))"
         PREV_LOGDIR="./logs/$EXP_NAME/$PREV_WANDB_NAME"
-        DATA_PATH="$PREV_LOGDIR/filtering_epoch$((FILTER_INDEX-1))/train_v4_cloud_${FILTER_THRESHOLD}.json"
+        DATA_PATH="$PREV_LOGDIR/filtering_epoch$((FILTER_INDEX-1))/train_filtered.json"
         CKPT_PARENT="$PREV_LOGDIR/train_epoch$((FILTER_INDEX-1))"
         MIN_CKPT_NAME=$(find_earliest_checkpoint "$CKPT_PARENT")
         if [ -z "$MIN_CKPT_NAME" ]; then
@@ -145,7 +143,8 @@ for (( FILTER_INDEX=0; FILTER_INDEX<NUM_FILTER_ITERS; FILTER_INDEX++ )); do
         --output_dir "./"
 
     python src/utils/process_data.py \
-        --input_json "$VLLM_OUT/train_v4_cloud.json" \
-        --task "$FILTER_THRESHOLD" \
+        --input_json  "$VLLM_OUT/train_v4_cloud.json" \
+        --output_json "$VLLM_OUT/train_filtered.json" \
+        --threshold "$FILTER_THRESHOLD" \
         -k "$FILTER_K"
 done

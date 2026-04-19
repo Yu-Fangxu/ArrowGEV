@@ -1,32 +1,43 @@
+"""Filter a per-sample difficulty JSON produced by :mod:`calc_difficulty`.
+
+The paper's dynamic difficulty filter keeps only samples the policy has *not*
+yet mastered — i.e. samples with ``0 < IoU <= threshold``. Two alternative
+sampling modes (``gaussian``, ``random``) are kept for ablations.
+
+Example::
+
+    python src/utils/process_data.py \\
+        --input_json  logs/exp/filtering_epoch0/train_v4_cloud.json \\
+        --output_json logs/exp/filtering_epoch0/train_filtered.json \\
+        --threshold 0.70 \\
+        -k 2500
+"""
+
 import argparse
 import json
 import math
 import os
 import random
-import re
 
 import numpy as np
 import torch
 
 
 def get_difficulty_safe(item):
-    """Safely gets and converts difficulty, handling errors."""
+    """Return ``item['difficulty']`` as a finite float, else ``None``."""
     difficulty = item.get("difficulty")
     if difficulty is None:
         return None
     try:
         difficulty_float = float(difficulty)
-        return (
-            difficulty_float
-            if not (math.isnan(difficulty_float) or math.isinf(difficulty_float))
-            else None
-        )
     except (ValueError, TypeError):
         return None
+    if math.isnan(difficulty_float) or math.isinf(difficulty_float):
+        return None
+    return difficulty_float
 
 
 def save_json(data_list, output_path, description):
-    """Helper function to save a list to a JSON file."""
     if data_list and isinstance(data_list[0], dict) and "data" in data_list[0]:
         data_to_save = [item["data"] for item in data_list]
     else:
@@ -40,33 +51,25 @@ def save_json(data_list, output_path, description):
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data_to_save, f, indent=4, ensure_ascii=False)
-        print(f"save to: {output_path}")
+    print(f"[{description}] wrote {len(data_to_save)} items -> {output_path}")
 
 
 def random_sample(data_list, k, output_path, description):
-    """Helper: Randomly samples k items, NO sorting afterwards."""
     if not isinstance(data_list, list):
-        print(f"Error ({description})")
         return
-
     n = len(data_list)
     k = min(n, k)
     sampled = data_list if k >= n else random.sample(data_list, k)
-    save_json(
-        sampled,
-        output_path,
-        f"{description} (random sample: {len(sampled)})",
-    )
+    save_json(sampled, output_path, f"{description} (random: {len(sampled)})")
 
 
 def difficulty_sorted_sample(data_list, k, output_path, description):
-    """Helper: Sorts list by difficulty descending, samples k items using torch.linspace."""
+    """Sort by descending difficulty and pick ``k`` items evenly along the sorted list."""
     if not data_list or k <= 0:
         return
     n = len(data_list)
     actual_k = min(n, k)
     sorted_list = sorted(data_list, key=lambda x: x["difficulty_float"], reverse=True)
-    sampled = []
     if actual_k >= n:
         sampled = sorted_list
     else:
@@ -74,60 +77,37 @@ def difficulty_sorted_sample(data_list, k, output_path, description):
         indices = torch.clamp(indices, 0, n - 1)
         unique_indices = torch.unique(indices)
         sampled = [sorted_list[i] for i in unique_indices]
-    save_json(
-        sampled,
-        output_path,
-        f"{description}",
-    )
+    save_json(sampled, output_path, description)
 
 
 def gaussian_sample(data_list, k, output_path, description, center=0.3, std_dev=0.2):
-    """Samples k items based on a Gaussian distribution centered on 'center'."""
+    """Importance-sample ``k`` items with weights from ``N(center, std_dev)``."""
     if not data_list or k <= 0:
         return
-
     n = len(data_list)
     actual_k = min(n, k)
-
     if actual_k == 0:
         return
 
-    difficulties = [item["difficulty_float"] / 100.0 for item in data_list]
-
-    probs = np.exp(-((np.array(difficulties) - center) ** 2) / (2 * std_dev**2))
-    probs /= np.sum(probs)  # Normalize to sum to 1
+    difficulties = np.array([item["difficulty_float"] / 100.0 for item in data_list])
+    probs = np.exp(-((difficulties - center) ** 2) / (2 * std_dev**2))
+    probs /= probs.sum()
 
     try:
-        sampled = [data_list[i] for i in np.random.choice(n, k, False, p=probs)]
-        save_json(
-            sampled,
-            output_path,
-            f"{description} (gaussian,mean: {center}, var:{std_dev})",
-        )
+        sampled = [data_list[i] for i in np.random.choice(n, actual_k, False, p=probs)]
     except ValueError as e:
-        print(f"{e}")
-
-
-def _parse_threshold_task(task):
-    """Match ``NNNN_all`` task names to a fractional IoU threshold.
-
-    ``0070_all`` -> 0.70   (keep samples with 0 < IoU <= 0.70)
-    ``0071_all`` -> 0.71
-    ``0080_all`` -> 0.80
-    """
-    m = re.fullmatch(r"(\d{4})_all", task)
-    if not m:
-        return None
-    return int(m.group(1)) / 100.0  # e.g. "0071" -> 0.71
-
-
-def process_ddata(input_json_path, output_prefix, task, k=2500):
-    try:
-        with open(input_json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as E:
-        print(f"{E}")
+        print(e)
         return
+    save_json(
+        sampled,
+        output_path,
+        f"{description} (gaussian, mean={center}, std={std_dev})",
+    )
+
+
+def process_ddata(input_json_path, output_path, threshold=0.7, mode="threshold", k=2500):
+    with open(input_json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
     valid_items = []
     for item in data:
@@ -136,54 +116,65 @@ def process_ddata(input_json_path, output_prefix, task, k=2500):
             valid_items.append(
                 {"difficulty_float": d, "p_value": d / 100.0, "data": item}
             )
-    if len(valid_items) == 0:
+    if not valid_items:
+        print("No valid items found.")
         return
-    print(f"valid data: {len(valid_items)} items (original: {len(data)})")
+    print(f"valid items: {len(valid_items)} (original: {len(data)})")
 
-    threshold = _parse_threshold_task(task)
-    if threshold is not None:
-        # Paper's "dynamic difficulty filter": drop samples the policy has already
-        # mastered (IoU > threshold) and keep the rest for the next epoch.
+    if mode == "threshold":
         subset = [item for item in valid_items if 0 < item["p_value"] <= threshold]
         difficulty_sorted_sample(
-            subset,
-            k,
-            f"{output_prefix}_{task}.json",
-            f"(0 < p <= {threshold:.2f})",
+            subset, k, output_path, f"threshold filter (0 < p <= {threshold:.2f})"
         )
-    elif task == "gaussian_03":
+    elif mode == "gaussian":
         subset = [item for item in valid_items if item["p_value"] > 0]
-        gaussian_sample(
-            subset,
-            k,
-            f"{output_prefix}_gaussian_03.json",
-            "gaussian: 0.3 center, 0.2 variance",
-        )
-    elif task == "random_sample":
-        random_sample(valid_items, k, f"{output_prefix}_random.json", "random_sample")
+        gaussian_sample(subset, k, output_path, "gaussian filter")
+    elif mode == "random":
+        random_sample(valid_items, k, output_path, "random filter")
     else:
-        raise ValueError(f"Unknown filtering task: {task!r}")
+        raise ValueError(f"Unknown --mode: {mode!r}")
 
     print("Done.")
 
 
+def _default_output(input_json):
+    stem = input_json[:-5] if input_json.endswith(".json") else input_json
+    return f"{stem}_filtered.json"
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input_json")
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--input_json", required=True, help="Scored input JSON (from calc_difficulty).")
     parser.add_argument(
-        "-o",
-        "--output_prefix",
-        default="",
+        "--output_json",
+        default=None,
+        help="Output JSON path (default: <input>_filtered.json).",
     )
-    parser.add_argument("-t", "--task", default="")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.7,
+        help="Keep samples with 0 < IoU <= threshold (default: 0.7).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["threshold", "gaussian", "random"],
+        default="threshold",
+    )
     parser.add_argument(
         "-k",
-        "--k_dynamic_total",
+        "--max_samples",
+        type=int,
         default=2500,
+        help="Maximum samples retained after filtering.",
     )
     args = parser.parse_args()
-    if not args.output_prefix:
-        args.output_prefix = args.input_json[:-5]
-    print(f"prefix: {args.output_prefix}")
-    args.k_dynamic_total = int(args.k_dynamic_total)
-    process_ddata(args.input_json, args.output_prefix, args.task, args.k_dynamic_total)
+
+    output_path = args.output_json or _default_output(args.input_json)
+    process_ddata(
+        args.input_json,
+        output_path,
+        threshold=args.threshold,
+        mode=args.mode,
+        k=args.max_samples,
+    )
